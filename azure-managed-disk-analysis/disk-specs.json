@@ -1,0 +1,54 @@
+{
+  "StandardHDD": {
+    "32":  { "Sku": "S4",  "MaxIOPS": 500,  "MaxMBps": 60, "MonthlyCost": 1.54 },
+    "64":  { "Sku": "S6",  "MaxIOPS": 500,  "MaxMBps": 60, "MonthlyCost": 3.01 },
+    "128": { "Sku": "S10", "MaxIOPS": 500,  "MaxMBps": 60, "MonthlyCost": 5.89 },
+    "256": { "Sku": "S15", "MaxIOPS": 500,  "MaxMBps": 60, "MonthlyCost": 11.33 },
+    "512": { "Sku": "S20", "MaxIOPS": 500,  "MaxMBps": 60, "MonthlyCost": 21.76 },
+    "1024": { "Sku": "S30", "MaxIOPS": 500, "MaxMBps": 60, "MonthlyCost": 40.96 },
+    "2048": { "Sku": "S40", "MaxIOPS": 500, "MaxMBps": 60, "MonthlyCost": 77.84 },
+    "4096": { "Sku": "S50", "MaxIOPS": 500, "MaxMBps": 60, "MonthlyCost": 143.36 },
+    "8192": { "Sku": "S60", "MaxIOPS": 500, "MaxMBps": 60, "MonthlyCost": 262.14 },
+    "16384": { "Sku": "S70", "MaxIOPS": 500, "MaxMBps": 60, "MonthlyCost": 524.29 },
+    "32768": { "Sku": "S80", "MaxIOPS": 500, "MaxMBps": 60, "MonthlyCost": 1048.58 }
+  },
+  "StandardSSD": {
+    "4":   { "Sku": "E1",  "MaxIOPS": 500,  "MaxMBps": 100, "MonthlyCost": 0.30 },
+    "8":   { "Sku": "E2",  "MaxIOPS": 500,  "MaxMBps": 100, "MonthlyCost": 0.60 },
+    "16":  { "Sku": "E3",  "MaxIOPS": 500,  "MaxMBps": 100, "MonthlyCost": 1.20 },
+    "32":  { "Sku": "E4",  "MaxIOPS": 500,  "MaxMBps": 100, "MonthlyCost": 2.40 },
+    "64":  { "Sku": "E6",  "MaxIOPS": 500,  "MaxMBps": 100, "MonthlyCost": 4.80 },
+    "128": { "Sku": "E10", "MaxIOPS": 500,  "MaxMBps": 100, "MonthlyCost": 9.60 },
+    "256": { "Sku": "E15", "MaxIOPS": 500,  "MaxMBps": 100, "MonthlyCost": 19.20 },
+    "512": { "Sku": "E20", "MaxIOPS": 500,  "MaxMBps": 100, "MonthlyCost": 38.40 },
+    "1024": { "Sku": "E30", "MaxIOPS": 500, "MaxMBps": 100, "MonthlyCost": 76.80 },
+    "2048": { "Sku": "E40", "MaxIOPS": 500, "MaxMBps": 100, "MonthlyCost": 153.60 },
+    "4096": { "Sku": "E50", "MaxIOPS": 500, "MaxMBps": 100, "MonthlyCost": 307.20 },
+    "8192": { "Sku": "E60", "MaxIOPS": 1300, "MaxMBps": 400, "MonthlyCost": 614.40 },
+    "16384": { "Sku": "E70", "MaxIOPS": 2000, "MaxMBps": 600, "MonthlyCost": 1228.80 },
+    "32768": { "Sku": "E80", "MaxIOPS": 2000, "MaxMBps": 750, "MonthlyCost": 2457.60 }
+  },
+    "PremiumSSD": {
+    "4":   { "Sku": "P1",  "MaxIOPS": 120,  "MaxMBps": 25, "MonthlyCost": 0.72 },
+    "8":   { "Sku": "P2",  "MaxIOPS": 120,  "MaxMBps": 25, "MonthlyCost": 1.44 },
+    "16":  { "Sku": "P3",  "MaxIOPS": 120,  "MaxMBps": 25, "MonthlyCost": 2.88 },
+    "32":  { "Sku": "P4",  "MaxIOPS": 120,  "MaxMBps": 25, "MonthlyCost": 5.28 },
+    "64":  { "Sku": "P6",  "MaxIOPS": 240,  "MaxMBps": 50, "MonthlyCost": 10.21 },
+    "128": { "Sku": "P10", "MaxIOPS": 500,  "MaxMBps": 100, "MonthlyCost": 19.71 },
+    "256": { "Sku": "P15", "MaxIOPS": 1100,  "MaxMBps": 125, "MonthlyCost": 38.01 },
+    "512": { "Sku": "P20", "MaxIOPS": 2300,  "MaxMBps": 150, "MonthlyCost": 73.22 },
+    "1024": { "Sku": "P30", "MaxIOPS": 5000, "MaxMBps": 200, "MonthlyCost": 135.170 },
+    "2048": { "Sku": "P40", "MaxIOPS": 7500, "MaxMBps": 250, "MonthlyCost": 259.05 },
+    "4096": { "Sku": "P50", "MaxIOPS": 7500, "MaxMBps": 250, "MonthlyCost": 495.57 },
+    "8192": { "Sku": "P60", "MaxIOPS": 16000, "MaxMBps": 500, "MonthlyCost": 946.08 },
+    "16384": { "Sku": "P70", "MaxIOPS": 18000, "MaxMBps": 750, "MonthlyCost": 1802.06 },
+    "32768": { "Sku": "P80", "MaxIOPS": 20000, "MaxMBps": 900, "MonthlyCost": 3604.11 }
+  },
+  "PremiumSSDv2": {
+    "Comment": "Premium SSD v2 is billed at $0.00011/hour per GiB ($0.0803/month per GiB). Max throughput: 750 MB/s, Max IOPS: 3000 (for sizes up to ~37 GiB, scales higher for larger disks)",
+    "HourlyRatePerGiB": 0.00011,
+    "MonthlyRatePerGiB": 0.0803,
+    "MaxIOPS": 3000,
+    "MaxMBps": 750
+  }
+}
