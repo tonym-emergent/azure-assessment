@@ -998,7 +998,6 @@ function New-HtmlReport {
             border-radius: 10px;
             box-shadow: 0 10px 40px rgba(0,0,0,0.2);
             overflow: hidden;
-            display: block;
         }
         
         .header {
@@ -1006,7 +1005,6 @@ function New-HtmlReport {
             color: white;
             padding: 30px;
             text-align: center;
-            display: block;
         }
         
         .header h1 {
@@ -1021,29 +1019,11 @@ function New-HtmlReport {
         
         .stats {
             display: grid;
-            grid-template-columns: repeat(6, 1fr);
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
             gap: 20px;
             padding: 30px;
             background: #f8f9fa;
             border-bottom: 3px solid #e9ecef;
-        }
-        
-        @media (max-width: 1400px) {
-            .stats {
-                grid-template-columns: repeat(3, 1fr);
-            }
-        }
-        
-        @media (max-width: 900px) {
-            .stats {
-                grid-template-columns: repeat(2, 1fr);
-            }
-        }
-        
-        @media (max-width: 600px) {
-            .stats {
-                grid-template-columns: 1fr;
-            }
         }
         
         .stat-card {
@@ -1072,7 +1052,6 @@ function New-HtmlReport {
             padding: 20px 30px;
             background: #fff3cd;
             border-bottom: 3px solid #ffc107;
-            display: block;
         }
         
         .legend h3 {
@@ -1102,8 +1081,6 @@ function New-HtmlReport {
         .table-container {
             padding: 30px;
             overflow-x: auto;
-            display: block;
-            width: 100%;
         }
         
         table {
@@ -1228,25 +1205,63 @@ function New-HtmlReport {
             filter: brightness(1.05);
         }
         
-        /* Row highlighting based on recommendation */
-        .upgrade-needed {
-            background: #ffcccc !important;
-            border-left: 4px solid #dc3545;
+        /* Row highlighting based on status */
+        /* Savings-based highlighting (highest priority) */
+        .savings-critical {
+            background: #ff6b6b !important;  /* Bright red - >$100/month */
+            border-left: 4px solid #c92a2a;
+            color: #fff;
         }
         
-        .downgrade-opportunity {
-            background: #fff9db !important;
-            border-left: 4px solid #ffc107;
+        .savings-critical td {
+            color: #fff;
+        }
+        
+        .savings-critical .badge {
+            filter: brightness(1.1);
+        }
+        
+        .savings-high {
+            background: #ffcccc !important;  /* Light red - $25-$100/month */
+            border-left: 4px solid #e74c3c;
+            color: #2c1a1a;
+        }
+        
+        .savings-medium {
+            background: #fff9db !important;  /* Light yellow - <$25/month */
+            border-left: 4px solid #f1c40f;
+            color: #2c2416;
+        }
+        
+        .inefficient-size {
+            background: #ffe5cc !important;  /* Light orange - Inefficient/Needs Review */
+            border-left: 4px solid #e67e22;
+            color: #2c1f16;
         }
         
         .stay-ok {
-            background: #d4edda !important;
+            background: #d4edda !important;  /* Light green - Stay */
             border-left: 4px solid #28a745;
+            color: #1e4620;
+        }
+        
+        /* Legacy row classes (lower priority) */
+        .upgrade-needed {
+            background: #fff3cd !important;
+            border-left: 4px solid #ffc107;
+            color: #2c2416;
+        }
+        
+        .downgrade-opportunity {
+            background: #d1ecf1 !important;
+            border-left: 4px solid #17a2b8;
+            color: #1a3e47;
         }
         
         .custom-size {
             background: #e7e8ff !important;
             border-left: 4px solid #6c5ce7;
+            color: #2c2647;
         }
         
         .tier-not-handled {
@@ -1331,24 +1346,63 @@ function New-HtmlReport {
 
     # Calculate statistics
     $totalDisks = $Results.Count
-    $upgradeCount = ($Results | Where-Object { $_.Decision -like "*Upgrade*" }).Count
-    $downgradeCount = ($Results | Where-Object { $_.Decision -like "*Downgrade*" }).Count
     $stayCount = ($Results | Where-Object { $_.Decision -eq "Stay" -or $_.Decision -eq "Stay (latency-sensitive)" }).Count
     
+    # Calculate savings categories
+    $criticalSavings = 0
+    $highSavings = 0
+    $mediumSavings = 0
+    $inefficientCount = 0
+    
+    foreach ($result in $Results) {
+        $potentialSavings = 0
+        if ($result.Decision -like "*Upgrade*Premium*" -or $result.Decision -like "*Downgrade*") {
+            if ($result.CostDiffSSDtoBestPremium -lt 0) {
+                $potentialSavings = [math]::Abs($result.CostDiffSSDtoBestPremium)
+            } elseif ($result.CostSavingsHDDtoSSD -gt 0) {
+                $potentialSavings = $result.CostSavingsHDDtoSSD
+            }
+        }
+        
+        if ($potentialSavings -gt 100) { $criticalSavings++ }
+        elseif ($potentialSavings -gt 25) { $highSavings++ }
+        elseif ($potentialSavings -gt 0) { $mediumSavings++ }
+        
+        # Check inefficiency
+        if ($result.BillingTier -ne "N/A" -and $result.BillingTier -ne "Custom" -and $result.CustomSize -eq "Yes") {
+            $tierBoundaries = @(32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32767)
+            $currentTierIndex = $tierBoundaries.IndexOf([int]$result.BilledSizeGiB)
+            if ($currentTierIndex -gt 0) {
+                $lowerTierSize = $tierBoundaries[$currentTierIndex - 1]
+                $threshold = $lowerTierSize * 1.2
+                if ($result.ActualSizeGiB -le $threshold) {
+                    $inefficientCount++
+                }
+            }
+        }
+    }
+    
     $html += @"
-
         <div class="stats">
             <div class="stat-card">
                 <div class="number">$totalDisks</div>
                 <div class="label">Total Disks</div>
             </div>
             <div class="stat-card">
-                <div class="number" style="color: #dc3545;">$upgradeCount</div>
-                <div class="label">Upgrade Recommended</div>
+                <div class="number" style="color: #ff6b6b;">$criticalSavings</div>
+                <div class="label">Critical Savings (>$100/mo)</div>
             </div>
             <div class="stat-card">
-                <div class="number" style="color: #ffc107;">$downgradeCount</div>
-                <div class="label">Downgrade Possible</div>
+                <div class="number" style="color: #e74c3c;">$highSavings</div>
+                <div class="label">High Savings ($25-$100/mo)</div>
+            </div>
+            <div class="stat-card">
+                <div class="number" style="color: #f1c40f;">$mediumSavings</div>
+                <div class="label">Medium Savings (<$25/mo)</div>
+            </div>
+            <div class="stat-card">
+                <div class="number" style="color: #e67e22;">$inefficientCount</div>
+                <div class="label">Inefficient Sizing</div>
             </div>
             <div class="stat-card">
                 <div class="number" style="color: #28a745;">$stayCount</div>
@@ -1360,12 +1414,20 @@ function New-HtmlReport {
             <h3>📋 Row Color Legend</h3>
             <div class="legend-items">
                 <div class="legend-item">
-                    <div class="legend-color" style="background: #ffcccc; border-left: 4px solid #dc3545;"></div>
-                    <span><strong>Upgrade Recommended</strong> - Performance issues detected</span>
+                    <div class="legend-color" style="background: #ff6b6b; border-left: 4px solid #c92a2a;"></div>
+                    <span><strong>Critical Savings</strong> - Potential savings >$100/month</span>
                 </div>
                 <div class="legend-item">
-                    <div class="legend-color" style="background: #fff9db; border-left: 4px solid #ffc107;"></div>
-                    <span><strong>Downgrade Possible</strong> - Underutilized, could save money</span>
+                    <div class="legend-color" style="background: #ffcccc; border-left: 4px solid #e74c3c;"></div>
+                    <span><strong>High Savings</strong> - Potential savings $25-$100/month</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color" style="background: #fff9db; border-left: 4px solid #f1c40f;"></div>
+                    <span><strong>Medium Savings</strong> - Potential savings <$25/month</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color" style="background: #ffe5cc; border-left: 4px solid #e67e22;"></div>
+                    <span><strong>Inefficient/Needs Review</strong> - Within 20% of lower tier (wasting money)</span>
                 </div>
                 <div class="legend-item">
                     <div class="legend-color" style="background: #d4edda; border-left: 4px solid #28a745;"></div>
@@ -1420,17 +1482,56 @@ function New-HtmlReport {
     foreach ($result in ($Results | Sort-Object Subscription, ResourceGroup, Disk)) {
         # Determine row class based on conditions
         $rowClass = ""
+        $isInefficient = $false
         
-        # Assign row class based on decision type
-        if ($result.Decision -like "*Upgrade*") {
+        # Calculate potential savings for this disk
+        $potentialSavings = 0
+        if ($result.Decision -like "*Upgrade*Premium*" -or $result.Decision -like "*Downgrade*") {
+            # Use the best premium comparison or HDD/SSD savings
+            if ($result.CostDiffSSDtoBestPremium -lt 0) {
+                $potentialSavings = [math]::Abs($result.CostDiffSSDtoBestPremium)
+            } elseif ($result.CostSavingsHDDtoSSD -gt 0) {
+                $potentialSavings = $result.CostSavingsHDDtoSSD
+            }
+        }
+        
+        # Check if within 20% of lower tier
+        if ($result.BillingTier -ne "N/A" -and $result.BillingTier -ne "Custom" -and $result.CustomSize -eq "Yes") {
+            $billedSize = $result.BilledSizeGiB
+            $actualSize = $result.ActualSizeGiB
+            
+            # Define tier boundaries for checking
+            $tierBoundaries = @(32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32767)
+            $currentTierIndex = $tierBoundaries.IndexOf([int]$billedSize)
+            
+            if ($currentTierIndex -gt 0) {
+                $lowerTierSize = $tierBoundaries[$currentTierIndex - 1]
+                $threshold = $lowerTierSize * 1.2
+                if ($actualSize -le $threshold) {
+                    $isInefficient = $true
+                    $rowClass = "inefficient-size"
+                }
+            }
+        }
+        
+        # Assign row class based on priority: savings > inefficiency > decision type
+        if ($potentialSavings -gt 100) {
+            $rowClass = "savings-critical"  # >$100/month - bright red
+        } elseif ($potentialSavings -gt 25) {
+            $rowClass = "savings-high"  # >$25/month - light red
+        } elseif ($potentialSavings -gt 0 -and $potentialSavings -le 25) {
+            $rowClass = "savings-medium"  # <$25/month - light yellow
+        } elseif ($isInefficient) {
+            $rowClass = "inefficient-size"  # Inefficient - light orange
+        } elseif ($result.Decision -eq "Stay" -or $result.Decision -eq "Stay (latency-sensitive)") {
+            $rowClass = "stay-ok"  # Stay - light green
+        } elseif ($result.Decision -like "*Upgrade*") {
             $rowClass = "upgrade-needed"
         } elseif ($result.Decision -like "*Downgrade*") {
             $rowClass = "downgrade-opportunity"
-        } elseif ($result.Decision -eq "Stay" -or $result.Decision -eq "Stay (latency-sensitive)") {
-            $rowClass = "stay-ok"
         } elseif ($result.Decision -eq "Tier not handled") {
             $rowClass = "tier-not-handled"
-        } elseif ($result.CustomSize -eq "Yes") {
+        } elseif ($result.CustomSize -eq "Yes" -and $rowClass -eq "") {
             $rowClass = "custom-size"
         }
         
@@ -1463,6 +1564,11 @@ function New-HtmlReport {
             $decisionBadge = "<span class='badge badge-secondary'>⚠️ $($result.Decision)</span>"
         } else {
             $decisionBadge = "<span class='badge badge-secondary'>$($result.Decision)</span>"
+        }
+        
+        # Add inefficiency warning
+        if ($isInefficient) {
+            $decisionBadge = "<span class='badge badge-danger'>💸 Inefficient Size</span> " + $decisionBadge
         }
         
         # Custom size badge
@@ -1532,9 +1638,7 @@ function New-HtmlReport {
                 $costDiffDisplay = "SSD +`$$($absDiff.ToString('F2'))"
             }
         }
-        
-        $html += @"
-
+                $html += @"
                     <tr class="$rowClass">
                         <td><strong>$($result.Disk)</strong></td>
                         <td>$($result.ResourceGroup)</td>
