@@ -1342,6 +1342,7 @@ function New-HtmlReport {
             <h1>🔍 Azure Managed Disk Analysis</h1>
             <p>Generated on $(Get-Date -Format "MMMM dd, yyyy 'at' HH:mm:ss")</p>
         </div>
+
 "@
 
     # Calculate statistics
@@ -1382,7 +1383,7 @@ function New-HtmlReport {
         }
     }
     
-    $html += @"
+$html += @"
         <div class="stats">
             <div class="stat-card">
                 <div class="number">$totalDisks</div>
@@ -1390,15 +1391,15 @@ function New-HtmlReport {
             </div>
             <div class="stat-card">
                 <div class="number" style="color: #ff6b6b;">$criticalSavings</div>
-                <div class="label">Critical Savings (>$100/mo)</div>
+                <div class="label">Critical Savings (>`$100/mo)</div>
             </div>
             <div class="stat-card">
                 <div class="number" style="color: #e74c3c;">$highSavings</div>
-                <div class="label">High Savings ($25-$100/mo)</div>
+                <div class="label">High Savings (`$25-`$100/mo)</div>
             </div>
             <div class="stat-card">
                 <div class="number" style="color: #f1c40f;">$mediumSavings</div>
-                <div class="label">Medium Savings (<$25/mo)</div>
+                <div class="label">Medium Savings (<`$25/mo)</div>
             </div>
             <div class="stat-card">
                 <div class="number" style="color: #e67e22;">$inefficientCount</div>
@@ -1415,15 +1416,15 @@ function New-HtmlReport {
             <div class="legend-items">
                 <div class="legend-item">
                     <div class="legend-color" style="background: #ff6b6b; border-left: 4px solid #c92a2a;"></div>
-                    <span><strong>Critical Savings</strong> - Potential savings >$100/month</span>
+                    <span><strong>Critical Savings</strong> - Potential savings >`$100/month</span>
                 </div>
                 <div class="legend-item">
                     <div class="legend-color" style="background: #ffcccc; border-left: 4px solid #e74c3c;"></div>
-                    <span><strong>High Savings</strong> - Potential savings $25-$100/month</span>
+                    <span><strong>High Savings</strong> - Potential savings `$25-`$100/month</span>
                 </div>
                 <div class="legend-item">
                     <div class="legend-color" style="background: #fff9db; border-left: 4px solid #f1c40f;"></div>
-                    <span><strong>Medium Savings</strong> - Potential savings <$25/month</span>
+                    <span><strong>Medium Savings</strong> - Potential savings <`$25/month</span>
                 </div>
                 <div class="legend-item">
                     <div class="legend-color" style="background: #ffe5cc; border-left: 4px solid #e67e22;"></div>
@@ -1477,6 +1478,7 @@ function New-HtmlReport {
                     </tr>
                 </thead>
                 <tbody>
+
 "@
 
     foreach ($result in ($Results | Sort-Object Subscription, ResourceGroup, Disk)) {
@@ -1654,10 +1656,11 @@ function New-HtmlReport {
                         <td class="number-cell $costDiffClass" data-sort-value="$costDiffSortValue">$costDiffDisplay</td>
                         <td>$decisionBadge</td>
                     </tr>
+
 "@
     }
     
-    $html += @"
+$html += @"
                 </tbody>
             </table>
         </div>

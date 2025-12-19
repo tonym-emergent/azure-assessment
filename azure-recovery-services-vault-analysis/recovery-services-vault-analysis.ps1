@@ -6,9 +6,17 @@
     This script queries all Recovery Services Vaults in specified subscriptions and analyzes Azure IaaS VM backups:
     - Backup policies and schedules
     - Protected VMs and their backup status
-    - Backup storage consumption over time
-    - Daily snapshot growth to estimate churn rate
-    - Cost analysis based on backup storage and churn patterns
+    - Backup storage size estimates based on recent backup jobs
+    - Daily snapshot growth to calculate churn rate
+    - Risk assessment based on backup patterns and health status
+    
+    IMPORTANT: Azure does not expose per-VM total backup storage size through programmatic APIs.
+    The "Backup Size" shown in this report is based on the most recent backup job's data transfer size,
+    which may not accurately represent the total cumulative storage consumed by all retention points.
+    
+    For accurate total backup storage consumption, please refer to:
+    - Azure Portal > Recovery Services Vault > Backup Items > Storage consumption
+    - Azure Cost Management billing reports
     
     Note: This script currently focuses only on Azure VM (IaaS) backups and does not analyze SQL, SAP HANA, or other workload types.
     
@@ -42,16 +50,28 @@
     
     Uses a 100 GB/day high-churn threshold and generates reports with custom filenames.
 
+.EXAMPLE
+    .\recovery-services-vault-analysis.ps1 -VMName "vmaderant001","vmsql001" -DaysToInspect 7
+    
+    Analyzes only the specified VMs and shows detailed recovery point information.
+
 .NOTES
     Requires Azure CLI (az) to be installed and authenticated.
     Requires read access to Recovery Services Vaults and backup data in the target subscriptions.
+    
+    LIMITATION: Per-VM total backup storage size is not available through Azure CLI or APIs.
+    The script uses the most recent backup job size as an approximation.
+    
+    STORAGE REDUNDANCY: The "Actual Vault Storage" metric shows the total billable storage.
+    For RA-GRS vaults, this is the primary storage size (replication is included in billing but not doubled).
 #>
 
 param(
     [int]$DaysToInspect = 30,
     [double]$HighChurnThresholdGB = 50,
     [string[]]$SubscriptionId,
-    [string]$OutputPrefix = "vault-analysis"
+    [string]$OutputPrefix = "vault-analysis",
+    [string[]]$VMName
 )
 
 #region Helper Functions
@@ -200,6 +220,33 @@ function Get-DailyChurnRate {
 
 <#
 .SYNOPSIS
+    Calculates the Azure Backup protected instance tier based on source data size.
+    
+.DESCRIPTION
+    Azure Backup bills VMs based on protected instance tiers:
+    - Instance 1: 0-512 GB
+    - Instance 2: 512-1024 GB (512 GB + 512 GB)
+    - Instance 3: 1024-1536 GB (1024 GB + 512 GB)
+    - Instance 4: 1536-2048 GB (1536 GB + 512 GB)
+    And continues in 512 GB increments.
+    
+.PARAMETER SizeGB
+    The total source data size in GB (sum of all disk sizes attached to the VM).
+#>
+function Get-BackupInstanceTier {
+    param([double]$SizeGB)
+    
+    if ($SizeGB -eq 0) { return 0 }
+    
+    # Instance tier is calculated as: ceiling(SizeGB / 512)
+    # This means every 512 GB (or portion thereof) counts as one instance
+    $tier = [Math]::Ceiling($SizeGB / 512)
+    
+    return [int]$tier
+}
+
+<#
+.SYNOPSIS
     Formats bytes to human-readable format (GB, TB, etc.)
 #>
 function Format-ByteSize {
@@ -213,6 +260,177 @@ function Format-ByteSize {
         return "{0:N2} MB" -f ($Bytes / 1MB)
     } else {
         return "{0:N2} KB" -f ($Bytes / 1KB)
+    }
+}
+
+<#
+.SYNOPSIS
+    Gets the total backup storage consumption for a Recovery Services Vault.
+    
+.DESCRIPTION
+    Queries the vault's usages API to retrieve actual total backup storage consumption
+    by storage redundancy type (GRS, LRS, RAGRS, ZRS, RAGZRS, Archive).
+    
+.RETURNS
+    PSCustomObject with storage usage by type in bytes and formatted strings.
+#>
+function Get-VaultStorageUsage {
+    param(
+        [string]$VaultName,
+        [string]$VaultResourceGroup,
+        [string]$SubscriptionId
+    )
+    
+    try {
+        $usagesUrl = "https://management.azure.com/subscriptions/$SubscriptionId/resourceGroups/$VaultResourceGroup/providers/Microsoft.RecoveryServices/vaults/$VaultName/usages?api-version=2024-04-01"
+        
+        $usages = Invoke-AzCliJson @(
+            "rest",
+            "--method","get",
+            "--url",$usagesUrl
+        )
+        
+        $storageTypes = @{
+            GRS = 0
+            LRS = 0
+            RAGRS = 0
+            ZRS = 0
+            RAGZRS = 0
+            ArchiveGRS = 0
+            ArchiveLRS = 0
+        }
+        
+        if ($usages -and $usages.value) {
+            foreach ($usage in $usages.value) {
+                $name = $usage.name.value
+                switch ($name) {
+                    "GRSStorageUsage" { $storageTypes.GRS = $usage.currentValue }
+                    "LRSStorageUsage" { $storageTypes.LRS = $usage.currentValue }
+                    "RAGRSStorageUsage" { $storageTypes.RAGRS = $usage.currentValue }
+                    "ZRSStorageUsage" { $storageTypes.ZRS = $usage.currentValue }
+                    "RAGZRSStorageUsage" { $storageTypes.RAGZRS = $usage.currentValue }
+                    "ArchiveGRSStorageUsage" { $storageTypes.ArchiveGRS = $usage.currentValue }
+                    "ArchiveLRSStorageUsage" { $storageTypes.ArchiveLRS = $usage.currentValue }
+                }
+            }
+        }
+        
+        $totalBytes = $storageTypes.GRS + $storageTypes.LRS + $storageTypes.RAGRS + $storageTypes.ZRS + $storageTypes.RAGZRS + $storageTypes.ArchiveGRS + $storageTypes.ArchiveLRS
+        
+        return [PSCustomObject]@{
+            TotalBytes = $totalBytes
+            TotalGB = [math]::Round($totalBytes / 1GB, 2)
+            TotalTB = [math]::Round($totalBytes / 1TB, 2)
+            GRS_GB = [math]::Round($storageTypes.GRS / 1GB, 2)
+            LRS_GB = [math]::Round($storageTypes.LRS / 1GB, 2)
+            RAGRS_GB = [math]::Round($storageTypes.RAGRS / 1GB, 2)
+            ZRS_GB = [math]::Round($storageTypes.ZRS / 1GB, 2)
+            RAGZRS_GB = [math]::Round($storageTypes.RAGZRS / 1GB, 2)
+            ArchiveGRS_GB = [math]::Round($storageTypes.ArchiveGRS / 1GB, 2)
+            ArchiveLRS_GB = [math]::Round($storageTypes.ArchiveLRS / 1GB, 2)
+            FormattedTotal = Format-ByteSize -Bytes $totalBytes
+        }
+    }
+    catch {
+        Write-Warning "Failed to get vault storage usage for $VaultName : $_"
+        return [PSCustomObject]@{
+            TotalBytes = 0
+            TotalGB = 0
+            TotalTB = 0
+            GRS_GB = 0
+            LRS_GB = 0
+            RAGRS_GB = 0
+            ZRS_GB = 0
+            RAGZRS_GB = 0
+            ArchiveGRS_GB = 0
+            ArchiveLRS_GB = 0
+            FormattedTotal = "N/A"
+        }
+    }
+}
+
+<#
+.SYNOPSIS
+    Gets the actual backup storage size for a protected item using Azure Monitor metrics.
+    
+.DESCRIPTION
+    Attempts to query backup storage size. Note: Azure does not currently expose per-VM backup storage
+    size through programmatic APIs. This function is included for future compatibility and will
+    return 0 if no data is available. The script falls back to using the latest backup job size
+    as an approximation.
+    
+.NOTES
+    Azure Recovery Services Vaults do not expose BackupStorageSize as a metric.
+    Per-VM storage size is only available through:
+    - Azure Portal UI
+    - Cost Management/Billing reports
+    - Manual calculation from recovery point storage
+#>
+function Get-ActualBackupStorageSize {
+    param(
+        [string]$VaultName,
+        [string]$VaultResourceGroup,
+        [string]$SubscriptionId,
+        [string]$ProtectedItemName
+    )
+    
+    # Azure does not expose per-VM backup storage size through APIs
+    # Return 0 to indicate no data available
+    # The calling code will fall back to using backup job size estimates
+    return 0
+}
+
+<#
+.SYNOPSIS
+    Gets recovery point details for a protected VM.
+    
+.DESCRIPTION
+    Retrieves all recovery points for a VM backup and returns detailed information
+    about each restore point including time, type, and tier status.
+#>
+function Get-RecoveryPointDetails {
+    param(
+        [string]$VaultName,
+        [string]$VaultResourceGroup,
+        [string]$SubscriptionId,
+        [string]$ContainerName,
+        [string]$ItemName
+    )
+    
+    try {
+        $recoveryPoints = Invoke-AzCliJson @(
+            "backup","recoverypoint","list",
+            "--container-name",$ContainerName,
+            "--item-name",$ItemName,
+            "--resource-group",$VaultResourceGroup,
+            "--vault-name",$VaultName,
+            "--backup-management-type","AzureIaasVM"
+        )
+        
+        $rpDetails = @()
+        if ($recoveryPoints) {
+            foreach ($rp in $recoveryPoints) {
+                $tiers = @()
+                if ($rp.properties.recoveryPointTierDetails) {
+                    $tiers = $rp.properties.recoveryPointTierDetails | ForEach-Object {
+                        "$($_.type):$($_.status)"
+                    }
+                }
+                
+                $rpDetails += [PSCustomObject]@{
+                    Name = $rp.name
+                    Time = $rp.properties.recoveryPointTime
+                    Type = $rp.properties.recoveryPointType
+                    Tiers = ($tiers -join ", ")
+                }
+            }
+        }
+        
+        return $rpDetails
+    }
+    catch {
+        Write-Warning "Failed to get recovery points for $ItemName : $_"
+        return @()
     }
 }
 
@@ -249,6 +467,7 @@ Write-Host ""
 #region Vault Discovery and Data Collection
 
 $allResults = @()
+$vaultStorageInfo = @{}  # Track vault storage by vault name
 $totalVaults = 0
 $totalProtectedItems = 0
 
@@ -278,6 +497,11 @@ foreach ($sub in $SubscriptionId) {
         
         Write-Host "  🔍 Analyzing Vault: $vaultName (RG: $vaultRg)" -ForegroundColor White
         
+        # Get vault-level total storage usage
+        Write-Host "    ├─ Querying vault storage usage..." -ForegroundColor Gray
+        $vaultStorage = Get-VaultStorageUsage -VaultName $vaultName -VaultResourceGroup $vaultRg -SubscriptionId $sub
+        Write-Host "    ├─ Vault Total Storage: $($vaultStorage.FormattedTotal) ($($vaultStorage.TotalGB) GB)" -ForegroundColor Cyan
+        
         # Get backup policies for this vault
         $policies = Invoke-AzCliJson @(
             "backup","policy","list",
@@ -306,6 +530,26 @@ foreach ($sub in $SubscriptionId) {
         $totalProtectedItems += $protectedItems.Count
         Write-Host "    ├─ Found $($protectedItems.Count) VM backup(s)" -ForegroundColor Gray
         
+        # Filter by VM name if specified
+        if ($VMName -and $VMName.Count -gt 0) {
+            $protectedItems = $protectedItems | Where-Object { 
+                $vmFriendlyName = $_.properties.friendlyName
+                $VMName -contains $vmFriendlyName
+            }
+            
+            if ($protectedItems.Count -eq 0) {
+                Write-Host "    └─ No matching VMs found for filter: $($VMName -join ', ')" -ForegroundColor Yellow
+                Write-Host ""
+                continue
+            }
+            
+            Write-Host "    ├─ Filtered to $($protectedItems.Count) matching VM(s)" -ForegroundColor Cyan
+        }
+        
+        # Store vault storage info for reporting
+        $vaultKey = "$sub|$vaultRg|$vaultName"
+        $vaultStorageInfo[$vaultKey] = $vaultStorage
+        
         # Analyze each protected item
         $itemCount = 0
         foreach ($item in $protectedItems) {
@@ -317,8 +561,30 @@ foreach ($sub in $SubscriptionId) {
             $workloadType = $item.properties.workloadType
             $policyId = $item.properties.policyId
             $policyName = if ($policyId) { $policyId.Split('/')[-1] } else { "N/A" }
+            $sourceResourceId = $item.properties.sourceResourceId
             
             Write-Host "    ├─ [$itemCount/$($protectedItems.Count)] $itemName" -ForegroundColor DarkGray
+            
+            # Get VM disk information for instance tier calculation
+            $vmDiskSizeGB = 0
+            $instanceTier = 0
+            if ($sourceResourceId) {
+                $vmDetails = Invoke-AzCliJson @("vm","show","--ids",$sourceResourceId)
+                if ($vmDetails -and $vmDetails.storageProfile) {
+                    # Sum all disk sizes (OS + data disks)
+                    if ($vmDetails.storageProfile.osDisk.diskSizeGB) {
+                        $vmDiskSizeGB += $vmDetails.storageProfile.osDisk.diskSizeGB
+                    }
+                    if ($vmDetails.storageProfile.dataDisks) {
+                        foreach ($disk in $vmDetails.storageProfile.dataDisks) {
+                            if ($disk.diskSizeGB) {
+                                $vmDiskSizeGB += $disk.diskSizeGB
+                            }
+                        }
+                    }
+                    $instanceTier = Get-BackupInstanceTier -SizeGB $vmDiskSizeGB
+                }
+            }
             
             # Get backup jobs for this item in the analysis window
             $jobs = Invoke-AzCliJson @(
@@ -358,8 +624,49 @@ foreach ($sub in $SubscriptionId) {
                 $itemJobs = @()
             }
             
-            # Calculate churn metrics
+            # Calculate churn metrics from backup jobs (incremental backup sizes)
             $churnMetrics = Get-DailyChurnRate -BackupJobs $itemJobs -Days $DaysToInspect
+            
+            # Note: Azure does not expose per-VM total backup storage size through APIs
+            # We use the most recent backup job size as an approximation
+            $totalBackupSizeGB = $churnMetrics.TotalBackupSizeGB
+            
+            # If VMName filter is active, display individual backup job details
+            if ($VMName -and $VMName.Count -gt 0 -and $itemJobs -and $itemJobs.Count -gt 0) {
+                Write-Host "    │" -ForegroundColor DarkGray
+                Write-Host "    │  📊 Backup Job Details (last $DaysToInspect days - $($itemJobs.Count) jobs):" -ForegroundColor Cyan
+                
+                $sortedJobs = $itemJobs | Sort-Object { [DateTime]$_.properties.endTime } -Descending
+                foreach ($job in $sortedJobs) {
+                    $jobEndTime = [DateTime]$job.properties.endTime
+                    $backupSizeStr = "N/A"
+                    $backupSizeGB = 0
+                    
+                    if ($job.properties.extendedInfo.propertyBag.'Backup Size') {
+                        $backupSizeStr = $job.properties.extendedInfo.propertyBag.'Backup Size'
+                    } elseif ($job.properties.extendedInfo.propertyBag.'Data Transferred') {
+                        $backupSizeStr = $job.properties.extendedInfo.propertyBag.'Data Transferred'
+                    }
+                    
+                    # Convert to GB for display
+                    if ($backupSizeStr -ne "N/A") {
+                        $sizeValue = [double]($backupSizeStr -replace '[^0-9.]','')
+                        if ($backupSizeStr -match 'TB') {
+                            $backupSizeGB = [math]::Round($sizeValue * 1024, 2)
+                        } elseif ($backupSizeStr -match 'MB') {
+                            $backupSizeGB = [math]::Round($sizeValue / 1024, 2)
+                        } elseif ($backupSizeStr -match 'GB') {
+                            $backupSizeGB = [math]::Round($sizeValue, 2)
+                        }
+                        $displaySize = "$backupSizeGB GB"
+                    } else {
+                        $displaySize = "N/A"
+                    }
+                    
+                    Write-Host "    │    • $($jobEndTime.ToString('yyyy-MM-dd HH:mm')) - Size: $displaySize" -ForegroundColor Gray
+                }
+                Write-Host "    │" -ForegroundColor DarkGray
+            }
             
             # Get recovery point count from backup jobs instead of querying recovery points
             # Querying recovery points can be problematic with container name formats
@@ -392,7 +699,7 @@ foreach ($sub in $SubscriptionId) {
                 $flags += "Moderate Churn"
             }
             
-            if ($churnMetrics.TotalBackupSizeGB -ge 1000) {
+            if ($totalBackupSizeGB -ge 1000) {
                 $flags += "Large Backup (>1TB)"
                 if ($riskLevel -eq "Low") { $riskLevel = "Medium" }
             }
@@ -401,18 +708,6 @@ foreach ($sub in $SubscriptionId) {
                 $flags += "Health: $healthStatus"
                 $riskLevel = "High"
             }
-            
-            # Estimate monthly backup storage cost (simplified)
-            # Azure Backup pricing: ~$10/month per 50 GB for first 50 GB, then $0.10/GB/month
-            $monthlyStorageCost = if ($churnMetrics.TotalBackupSizeGB -le 50) {
-                ($churnMetrics.TotalBackupSizeGB / 50) * 10
-            } else {
-                10 + (($churnMetrics.TotalBackupSizeGB - 50) * 0.10)
-            }
-            
-            # Add monthly churn impact (incremental backups)
-            $monthlyChurnCost = ($churnMetrics.DailyChurnGB * 30) * 0.10
-            $estimatedMonthlyCost = [math]::Round($monthlyStorageCost + $monthlyChurnCost, 2)
             
             # Create result object
             $result = [PSCustomObject]@{
@@ -426,14 +721,15 @@ foreach ($sub in $SubscriptionId) {
                 ProtectionState = $status
                 HealthStatus = $healthStatus
                 LatestRecoveryPoint = $latestRecoveryPoint
-                TotalBackupSizeGB = $churnMetrics.TotalBackupSizeGB
+                VMDiskSizeGB = $vmDiskSizeGB
+                InstanceTier = $instanceTier
+                TotalBackupSizeGB = $totalBackupSizeGB
                 DailyChurnGB = $churnMetrics.DailyChurnGB
                 MonthlyChurnGB = [math]::Round($churnMetrics.DailyChurnGB * 30, 2)
                 BackupJobCount = $churnMetrics.JobCount
                 RecoveryPoints = $recoveryPointCount
                 RiskLevel = $riskLevel
                 Flags = ($flags -join ", ")
-                EstimatedMonthlyCost = $estimatedMonthlyCost
                 RecommendedAction = if ($riskLevel -eq "High") { 
                     "Investigate high churn/backup issues" 
                 } elseif ($riskLevel -eq "Medium") { 
@@ -441,6 +737,7 @@ foreach ($sub in $SubscriptionId) {
                 } else { 
                     "No action needed" 
                 }
+                BackupJobs = $itemJobs  # Store job details for detailed reporting
             }
             
             $allResults += $result
@@ -780,7 +1077,16 @@ function New-HtmlReport {
     $lowRisk = ($Results | Where-Object { $_.RiskLevel -eq "Low" }).Count
     $totalBackupSize = [math]::Round(($Results | Measure-Object -Property TotalBackupSizeGB -Sum).Sum, 2)
     $totalDailyChurn = [math]::Round(($Results | Measure-Object -Property DailyChurnGB -Sum).Sum, 2)
-    $totalMonthlyCost = [math]::Round(($Results | Measure-Object -Property EstimatedMonthlyCost -Sum).Sum, 2)
+    
+    # Calculate actual vault storage totals
+    $actualVaultStorageGB = 0
+    $actualVaultStorageTB = 0
+    foreach ($vaultInfo in $script:vaultStorageInfo.Values) {
+        $actualVaultStorageGB += $vaultInfo.TotalGB
+        $actualVaultStorageTB += $vaultInfo.TotalTB
+    }
+    $actualVaultStorageGB = [math]::Round($actualVaultStorageGB, 2)
+    $actualVaultStorageTB = [math]::Round($actualVaultStorageTB, 2)
     
     $html += @"
         <div class="stats">
@@ -801,16 +1107,12 @@ function New-HtmlReport {
                 <div class="label">Low Risk</div>
             </div>
             <div class="stat-card">
-                <div class="number">$totalBackupSize</div>
-                <div class="label">Total Backup (GB)</div>
+                <div class="number" style="color: #17a2b8;">$actualVaultStorageTB TB</div>
+                <div class="label">Actual Vault Storage</div>
             </div>
             <div class="stat-card">
                 <div class="number">$totalDailyChurn</div>
                 <div class="label">Daily Churn (GB)</div>
-            </div>
-            <div class="stat-card">
-                <div class="number" style="color: #17a2b8;">$$totalMonthlyCost</div>
-                <div class="label">Est. Monthly Cost</div>
             </div>
         </div>
         
@@ -848,15 +1150,17 @@ function New-HtmlReport {
                         <th class="sortable" onclick="sortTable(3)">Policy</th>
                         <th class="sortable" onclick="sortTable(4)">Status</th>
                         <th class="sortable" onclick="sortTable(5)">Health</th>
-                        <th class="sortable" onclick="sortTable(6)">Backup Size (GB)</th>
-                        <th class="sortable" onclick="sortTable(7)">Daily Churn (GB)</th>
-                        <th class="sortable" onclick="sortTable(8)">Monthly Churn (GB)</th>
-                        <th class="sortable" onclick="sortTable(9)">Recovery Points</th>
-                        <th class="sortable" onclick="sortTable(10)">Risk Level</th>
-                        <th class="sortable" onclick="sortTable(11)">Est. Cost/Mo</th>
-                        <th class="sortable" onclick="sortTable(12)">Recommended Action</th>
+                        <th class="sortable" onclick="sortTable(6)">VM Disk Size (GB)</th>
+                        <th class="sortable" onclick="sortTable(7)">Instance Tier</th>
+                        <th class="sortable" onclick="sortTable(8)">Backup Size (GB)</th>
+                        <th class="sortable" onclick="sortTable(9)">Daily Churn (GB)</th>
+                        <th class="sortable" onclick="sortTable(10)">Monthly Churn (GB)</th>
+                        <th class="sortable" onclick="sortTable(11)">Recovery Points</th>
+                        <th class="sortable" onclick="sortTable(12)">Risk Level</th>
+                        <th class="sortable" onclick="sortTable(13)">Recommended Action</th>
                     </tr>
                     <tr class="filter-row">
+                        <th><input type="text" class="filter-input" placeholder="Filter..." onkeyup="filterTable()"></th>
                         <th><input type="text" class="filter-input" placeholder="Filter..." onkeyup="filterTable()"></th>
                         <th><input type="text" class="filter-input" placeholder="Filter..." onkeyup="filterTable()"></th>
                         <th><input type="text" class="filter-input" placeholder="Filter..." onkeyup="filterTable()"></th>
@@ -904,12 +1208,13 @@ $html += @"
                         <td>$($result.Policy)</td>
                         <td>$($result.ProtectionState)</td>
                         <td>$healthBadge</td>
+                        <td class="number-cell">$($result.VMDiskSizeGB)</td>
+                        <td class="number-cell">$($result.InstanceTier)</td>
                         <td class="number-cell">$($result.TotalBackupSizeGB)</td>
                         <td class="number-cell">$($result.DailyChurnGB)</td>
                         <td class="number-cell">$($result.MonthlyChurnGB)</td>
                         <td class="number-cell">$($result.RecoveryPoints)</td>
                         <td>$riskBadge</td>
-                        <td class="number-cell">`$$($result.EstimatedMonthlyCost)</td>
                         <td>$($result.RecommendedAction)</td>
                     </tr>
 "@
@@ -921,8 +1226,10 @@ $html += @"
         </div>
         
         <div class="footer">
-            <p>Azure Recovery Services Vault Analysis Report | Analysis Period: $DaysToInspect days</p>
-            <p>High Churn Threshold: $HighChurnThresholdGB GB/day | Cost estimates are approximate</p>
+            <p>Azure Recovery Services Vault Analysis Report | Analysis Period: $DaysToInspect days | High Churn Threshold: $HighChurnThresholdGB GB/day</p>
+            <p><strong>Important:</strong> Per-VM "Backup Size" is estimated from recent backup job data transfer sizes and may not reflect total cumulative storage.</p>
+            <p>The "Actual Vault Storage" stat above shows the true total backup storage consumption from Azure vault usage metrics ($actualVaultStorageTB TB).</p>
+            <p><strong>Note on RA-GRS:</strong> For RA-GRS vaults, the storage shown is the billable amount (primary data). Azure replicates this data but doesn't double-charge.</p>
         </div>
     </div>
     
@@ -1080,19 +1387,30 @@ Write-Host "  Medium Risk:           $($mediumRiskVMs.Count)" -ForegroundColor Y
 Write-Host "  Low Risk:              $($lowRiskVMs.Count)" -ForegroundColor Green
 Write-Host ""
 
+# Calculate actual vault storage totals
+$actualVaultStorageGB = 0
+$actualVaultStorageTB = 0
+foreach ($vaultInfo in $vaultStorageInfo.Values) {
+    $actualVaultStorageGB += $vaultInfo.TotalGB
+    $actualVaultStorageTB += $vaultInfo.TotalTB
+}
+$actualVaultStorageGB = [math]::Round($actualVaultStorageGB, 2)
+$actualVaultStorageTB = [math]::Round($actualVaultStorageTB, 2)
+
 $totalBackup = [math]::Round(($allResults | Measure-Object -Property TotalBackupSizeGB -Sum).Sum, 2)
 $totalChurn = [math]::Round(($allResults | Measure-Object -Property DailyChurnGB -Sum).Sum, 2)
-$totalCost = [math]::Round(($allResults | Measure-Object -Property EstimatedMonthlyCost -Sum).Sum, 2)
 
-Write-Host "Total Backup Storage:    $totalBackup GB" -ForegroundColor Cyan
+Write-Host "Actual Vault Storage:    $actualVaultStorageTB TB ($actualVaultStorageGB GB)" -ForegroundColor Cyan
+Write-Host "                         (For RA-GRS: this is billable primary data, not including replication)" -ForegroundColor DarkGray
+Write-Host "Per-VM Estimate Total:   $totalBackup GB (from backup job sizes)" -ForegroundColor DarkCyan
 Write-Host "Total Daily Churn:       $totalChurn GB/day" -ForegroundColor Cyan
-Write-Host "Est. Monthly Cost:       `$$totalCost" -ForegroundColor Cyan
 Write-Host ""
 
 if ($highRiskVMs.Count -gt 0) {
     Write-Host "⚠️  High Risk VMs (Top 5 by churn rate):" -ForegroundColor Red
     $highRiskVMs | Sort-Object DailyChurnGB -Descending | Select-Object -First 5 | ForEach-Object {
-        Write-Host "   • $($_.VMName): $($_.DailyChurnGB) GB/day - $($_.Flags)" -ForegroundColor Yellow
+        $instanceInfo = if ($_.InstanceTier -gt 0) { " [Instance Tier $($_.InstanceTier), $($_.VMDiskSizeGB) GB]" } else { "" }
+        Write-Host "   • $($_.VMName)$instanceInfo : $($_.DailyChurnGB) GB/day - $($_.Flags)" -ForegroundColor Yellow
     }
     Write-Host ""
 }
