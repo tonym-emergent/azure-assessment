@@ -1,0 +1,16 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "az": true,
+        "Set-Content": true,
+        "/^pwsh -NoLogo -NoProfile -File \\.\\\\azure-vm-analysis\\\\azure-vm-assessment\\.ps1 -DaysToInspect 1 -VMName vmadconnect001 -OutputPrefix vm-analysis-smoke$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^powershell -Command \"return \\(Get-Content -Path \\.\\\\azure-vm-analysis\\\\azure-vm-assessment\\.ps1 \\| Out-String\\)\" > \\$null$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "Out-Null": true,
+        "1410..1430": true
+    }
+}

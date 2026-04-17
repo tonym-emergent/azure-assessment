@@ -1,14 +1,16 @@
 <#
 .SYNOPSIS
-    Analyzes Azure managed disk performance telemetry to identify disks that may benefit from Performance Plus or expansion.
+    Analyzes Azure managed disk performance telemetry to identify optimization opportunities.
 
 .DESCRIPTION
     This script retrieves Azure managed disk metrics from Azure Monitor and analyzes their performance over a specified time window.
-    It identifies disks that consistently exceed their provisioned IOPS or throughput limits, suggesting they may benefit from:
-    - Enabling Performance Plus (for eligible disk SKUs)
-    - Expanding to a larger disk size with higher limits
+    It identifies disks that could benefit from tier changes (upgrade/downgrade) based on:
+    - Performance metrics (IOPS, throughput, latency)
+    - Cost optimization opportunities
+    - Utilization patterns
     
-    The script generates CSV reports with detailed metrics and recommendations.
+    The script generates JSON and CSV reports with detailed metrics and recommendations.
+    Use New-DiskAnalysisHtmlReport.ps1 to generate an interactive HTML report from the JSON output.
 
 .PARAMETER DaysToInspect
     Number of days of historical metrics to analyze. Default is 3 days.
@@ -26,15 +28,19 @@
     Default is "disk-specs.json" in the script directory.
 
 .PARAMETER OutputPrefix
-    Prefix for output CSV files. Two files will be generated:
-    - {OutputPrefix}-perfplus-candidates.csv - Disks that could benefit from Performance Plus
-    - {OutputPrefix}-expansion-candidates.csv - Disks that should be expanded to a larger size
+    Prefix for output files. Two files will be generated:
+    - {OutputPrefix}-{timestamp}.json - Full analysis results in JSON format
+    - {OutputPrefix}-{timestamp}.csv - Analysis results in CSV format
     Default is "disk-analysis".
+    
+    To generate an HTML report, run:
+    .\New-DiskAnalysisHtmlReport.ps1 -JsonPath "{OutputPrefix}-{timestamp}.json"
 
 .EXAMPLE
     .\azure-managed-disk-telemetry-analysis.ps1
     
     Analyzes all disks in the current subscription using default settings.
+    Outputs JSON and CSV files with timestamp.
 
 .EXAMPLE
     .\azure-managed-disk-telemetry-analysis.ps1 -SubscriptionId "12345678-1234-1234-1234-123456789012" -DaysToInspect 7
@@ -45,6 +51,11 @@
     .\azure-managed-disk-telemetry-analysis.ps1 -ExceedanceThreshold 0.10 -OutputPrefix "weekly-report"
     
     Uses a 10% exceedance threshold and generates reports with custom filenames.
+    
+.EXAMPLE
+    # Run analysis and immediately generate HTML report
+    .\azure-managed-disk-telemetry-analysis.ps1
+    .\New-DiskAnalysisHtmlReport.ps1 -JsonPath "disk-analysis-20250115-120000.json"
 
 .NOTES
     Requires Azure CLI (az) to be installed and authenticated.
@@ -91,19 +102,21 @@ function Get-SkuSpec {
 function Get-TierSize {
     param([string]$Tier)
     
-    # Standard HDD (S-series) and Standard SSD (E-series) tier sizes
+    # Standard HDD (S-series), Standard SSD (E-series), and Premium SSD (P-series) tier sizes
     $tierSizes = @{
-        "S4" = 32; "E4" = 32
-        "S6" = 64; "E6" = 64
-        "S10" = 128; "E10" = 128
-        "S15" = 256; "E15" = 256
-        "S20" = 512; "E20" = 512
-        "S30" = 1024; "E30" = 1024
-        "S40" = 2048; "E40" = 2048
-        "S50" = 4096; "E50" = 4096
-        "S60" = 8192; "E60" = 8192
-        "S70" = 16384; "E70" = 16384
-        "S80" = 32767; "E80" = 32767
+        "S4" = 32; "E4" = 32; "P4" = 32
+        "S6" = 64; "E6" = 64; "P6" = 64
+        "S10" = 128; "E10" = 128; "P10" = 128
+        "S15" = 256; "E15" = 256; "P15" = 256
+        "S20" = 512; "E20" = 512; "P20" = 512
+        "S30" = 1024; "E30" = 1024; "P30" = 1024
+        "S40" = 2048; "E40" = 2048; "P40" = 2048
+        "S50" = 4096; "E50" = 4096; "P50" = 4096
+        "S60" = 8192; "E60" = 8192; "P60" = 8192
+        "S70" = 16384; "E70" = 16384; "P70" = 16384
+        "S80" = 32767; "E80" = 32767; "P80" = 32768
+        # Premium SSD has additional smaller tiers
+        "P1" = 4; "P2" = 8; "P3" = 16
     }
     
     if ($tierSizes.ContainsKey($Tier)) {
@@ -121,24 +134,41 @@ function Get-BillingTier {
     param([string]$DiskType, [int]$ActualSizeGB)
     
     # Define tier boundaries (max size for each tier)
+    # Premium SSD has additional smaller tiers at 4, 8, 16 GB
     $tiers = @(
-        @{Name="S4/E4"; MaxSize=32; BilledSize=32},
-        @{Name="S6/E6"; MaxSize=64; BilledSize=64},
-        @{Name="S10/E10"; MaxSize=128; BilledSize=128},
-        @{Name="S15/E15"; MaxSize=256; BilledSize=256},
-        @{Name="S20/E20"; MaxSize=512; BilledSize=512},
-        @{Name="S30/E30"; MaxSize=1024; BilledSize=1024},
-        @{Name="S40/E40"; MaxSize=2048; BilledSize=2048},
-        @{Name="S50/E50"; MaxSize=4096; BilledSize=4096},
-        @{Name="S60/E60"; MaxSize=8192; BilledSize=8192},
-        @{Name="S70/E70"; MaxSize=16384; BilledSize=16384},
-        @{Name="S80/E80"; MaxSize=32767; BilledSize=32767}
+        @{Name="P1/E1"; MaxSize=4; BilledSize=4},
+        @{Name="P2/E2"; MaxSize=8; BilledSize=8},
+        @{Name="P3/E3"; MaxSize=16; BilledSize=16},
+        @{Name="S4/E4/P4"; MaxSize=32; BilledSize=32},
+        @{Name="S6/E6/P6"; MaxSize=64; BilledSize=64},
+        @{Name="S10/E10/P10"; MaxSize=128; BilledSize=128},
+        @{Name="S15/E15/P15"; MaxSize=256; BilledSize=256},
+        @{Name="S20/E20/P20"; MaxSize=512; BilledSize=512},
+        @{Name="S30/E30/P30"; MaxSize=1024; BilledSize=1024},
+        @{Name="S40/E40/P40"; MaxSize=2048; BilledSize=2048},
+        @{Name="S50/E50/P50"; MaxSize=4096; BilledSize=4096},
+        @{Name="S60/E60/P60"; MaxSize=8192; BilledSize=8192},
+        @{Name="S70/E70/P70"; MaxSize=16384; BilledSize=16384},
+        @{Name="S80/E80/P80"; MaxSize=32768; BilledSize=32768}
     )
     
     foreach ($tier in $tiers) {
         if ($ActualSizeGB -le $tier.MaxSize) {
-            $tierPrefix = if ($DiskType -eq "StandardSSD_LRS") { "E" } else { "S" }
-            $tierNumber = $tier.Name.Split('/')[0].Substring(1)
+            # Determine tier prefix based on disk type
+            $tierPrefix = if ($DiskType -eq "StandardSSD_LRS") { "E" } 
+                         elseif ($DiskType -eq "Premium_LRS" -or $DiskType -eq "PremiumV2_LRS") { "P" } 
+                         else { "S" }
+            
+            # Extract tier number from the appropriate position in the tier name
+            $tierParts = $tier.Name.Split('/')
+            $tierPart = $tierParts | Where-Object { $_ -like "$tierPrefix*" } | Select-Object -First 1
+            if ($tierPart) {
+                $tierNumber = $tierPart.Substring(1)
+            } else {
+                # Fallback: use first tier part
+                $tierNumber = $tierParts[0].Substring(1)
+            }
+            
             return @{
                 TierName = "$tierPrefix$tierNumber"
                 BilledSizeGB = $tier.BilledSize
@@ -303,6 +333,7 @@ function Get-DiskTelemetry {
     foreach ($metricName in $requiredMetrics) {
         if (-not $map.ContainsKey($metricName) -or -not $map[$metricName]) {
             Write-Host "      WARNING: Missing metric data for '$metricName'" -ForegroundColor Yellow
+            Write-Host "               Possible causes: Disk unattached, VM stopped/deallocated, or newly created disk" -ForegroundColor DarkGray
             return [pscustomobject]@{Samples=@(); Transactions=0; BurstOperations=0}
         }
     }
@@ -556,7 +587,7 @@ foreach ($sub in $SubscriptionId) {
     $diskList = Invoke-AzCliJson @(
         "disk","list",
         "--subscription",$sub,
-        "--query","[].{id:id,name:name,rg:resourceGroup,sku:sku.name,diskSizeGB:diskSizeGB,perfPlus:supportedCapabilities.performancePlus,expandedIops:diskIOPSReadWrite,expandedMBps:diskMBpsReadWrite,managedBy:managedBy}"
+        "--query","[].{id:id,name:name,rg:resourceGroup,sku:sku.name,diskSizeGB:diskSizeGB,perfPlus:supportedCapabilities.performancePlus,expandedIops:diskIOPSReadWrite,expandedMBps:diskMBpsReadWrite,managedBy:managedBy,osType:osType}"
     )
     if ($diskList) {
         foreach ($disk in $diskList) {
@@ -605,6 +636,7 @@ $results = foreach ($disk in $allDisks) {
     $tier = $disk.sku
     $actualSize = [int]$disk.diskSizeGB
     $isPerfPlus = [bool]$disk.perfPlus
+    $isOsDisk = ($null -ne $disk.osType -and $disk.osType -ne "")
     
     # Determine the billing tier and whether it's a custom size
     $billingInfo = $null
@@ -612,7 +644,7 @@ $results = foreach ($disk in $allDisks) {
     $isCustomSize = $false
     $billingTierName = "N/A"
     
-    if ($tier -eq "Standard_LRS" -or $tier -eq "StandardSSD_LRS") {
+    if ($tier -eq "Standard_LRS" -or $tier -eq "StandardSSD_LRS" -or $tier -eq "Premium_LRS") {
         $billingInfo = Get-BillingTier -DiskType $tier -ActualSizeGB $actualSize
         $size = $billingInfo.BilledSizeGB
         $isCustomSize = $billingInfo.IsCustomSize
@@ -627,12 +659,23 @@ $results = foreach ($disk in $allDisks) {
     $specForTier = switch ($tier) {
         "Standard_LRS" { Get-SkuSpec $hddSpecs $size }
         "StandardSSD_LRS" { Get-SkuSpec $ssdSpecs $size }
+        "Premium_LRS" { Get-SkuSpec $premiumSpecs $size }
         default { $null }
     }
     
     # Fetch performance telemetry
     $telemetry = Get-DiskTelemetry -ResourceId $disk.id
-    Write-Host "      Retrieved $($telemetry.Samples.Count) metric samples" -ForegroundColor DarkGray
+    
+    # Provide context if no metrics were retrieved
+    if ($telemetry.Samples.Count -eq 0) {
+        if (-not $disk.managedBy) {
+            Write-Host "      Disk is unattached (no VM) - metrics not available" -ForegroundColor DarkGray
+        } else {
+            Write-Host "      No metric samples retrieved - VM may have been stopped during analysis period" -ForegroundColor DarkGray
+        }
+    } else {
+        Write-Host "      Retrieved $($telemetry.Samples.Count) metric samples" -ForegroundColor DarkGray
+    }
     
     # Try to get per-disk latency metrics from the parent VM using LUN filtering
     $avgLatencyMs = 0
@@ -739,11 +782,16 @@ $results = foreach ($disk in $allDisks) {
     # This typically occurs for Premium SSD, Ultra Disk, or disk sizes not listed in the spec file
     if (-not $specForTier) {
         Write-Host "      Tier '$tier' (size: $size GiB) not in spec file - skipping analysis" -ForegroundColor Yellow
+        $metricsStatus = if ($telemetry.Samples.Count -eq 0) {
+            if (-not $disk.managedBy) { "Unattached" } else { "No Metrics" }
+        } else { "OK" }
+        
         [pscustomobject]@{
             Disk=$disk.name; ResourceGroup=$disk.rg; Subscription=$disk.subscriptionId
             SKU=$tier; ActualSizeGiB=$actualSize; BilledSizeGiB=$size; BillingTier=$billingTierName
             CustomSize=if ($isCustomSize) { "Yes" } else { "No" }
             Samples=$telemetry.Samples.Count
+            MetricsStatus=$metricsStatus
             PercentIOPSAbove=0; PercentMBpsAbove=0; Transactions=$telemetry.Transactions
             BurstOperations=$telemetry.BurstOperations
             EstMonthlyTransactionCost=[math]::Round($transactionCost,2)
@@ -821,7 +869,7 @@ $results = foreach ($disk in $allDisks) {
             $exceedsMBps = $percentMBps -gt $ExceedanceThreshold
             
             # Consider downgrade to HDD if performance would still be acceptable AND it would save money
-            if ($hddBaseline) {
+            if ($hddBaseline -and -not $isOsDisk) {
                 $performanceOk = (
                     (Get-PercentAbove $telemetry.Samples "IOPS" $hddBaseline.MaxIOPS) -le $ExceedanceThreshold -and
                     (Get-PercentAbove $telemetry.Samples "MBps" $hddBaseline.MaxMBps) -le $ExceedanceThreshold
@@ -831,11 +879,16 @@ $results = foreach ($disk in $allDisks) {
                 # If latency > 5ms, the disk is experiencing slower response times and should stay on SSD
                 $latencyRequiresSSD = $avgLatencyMs -gt 5
                 
+                # Calculate potential savings (costSavingsHDDtoSSD is negative when HDD is cheaper)
+                $potentialSavings = [math]::Abs($costSavingsHDDtoSSD)
+                
                 # Only recommend downgrade if:
-                # 1. HDD would be cheaper (costSavingsHDDtoSSD is negative)
-                # 2. Performance is acceptable on HDD
-                # 3. Latency is low enough (<= 5ms) that HDD would be acceptable
-                $downgrade = $performanceOk -and ($costSavingsHDDtoSSD -lt 0) -and (-not $latencyRequiresSSD)
+                # 1. Not an OS disk
+                # 2. HDD would be cheaper (costSavingsHDDtoSSD is negative)
+                # 3. Savings are at least $5/month
+                # 4. Performance is acceptable on HDD
+                # 5. Latency is low enough (<= 5ms) that HDD would be acceptable
+                $downgrade = $performanceOk -and ($costSavingsHDDtoSSD -lt 0) -and ($potentialSavings -ge 5) -and (-not $latencyRequiresSSD)
             }
             
             # Upgrade decision priority: Cost Savings → Latency → Throughput/IOPS
@@ -885,12 +938,22 @@ $results = foreach ($disk in $allDisks) {
             elseif ($downgrade) { 
                 $decision = "Downgrade to Standard HDD"
                 # Show cost savings (costSavingsHDDtoSSD is negative, so we use Abs to show positive savings)
-                Write-Host "      Recommendation: $decision (underutilized) - Would save `$$([math]::Round([math]::Abs($costSavingsHDDtoSSD),2))/month" -ForegroundColor Cyan
+                Write-Host "      Recommendation: $decision (data disk, underutilized) - Would save `$$([math]::Round([math]::Abs($costSavingsHDDtoSSD),2))/month" -ForegroundColor Cyan
             }
             elseif ($performanceOk -and ($costSavingsHDDtoSSD -lt 0) -and $avgLatencyMs -gt 5) {
                 # Would save money with HDD but latency indicates need for SSD performance
                 $decision = "Stay (latency-sensitive)"
                 Write-Host "      Recommendation: $decision - Latency ($avgLatencyMs ms) indicates need for SSD performance" -ForegroundColor Green
+            }
+            elseif ($performanceOk -and ($costSavingsHDDtoSSD -lt 0) -and $isOsDisk) {
+                # Would save money with HDD but it's an OS disk
+                $decision = "Stay (OS disk)"
+                Write-Host "      Recommendation: $decision - OS disks should not use Standard HDD" -ForegroundColor Green
+            }
+            elseif ($performanceOk -and ($costSavingsHDDtoSSD -lt 0) -and ([math]::Abs($costSavingsHDDtoSSD) -lt 5)) {
+                # Would save money with HDD but savings are less than $5/month
+                $decision = "Stay (minimal savings)"
+                Write-Host "      Recommendation: $decision - Potential savings <`$5/month (HDD would save `$$([math]::Round([math]::Abs($costSavingsHDDtoSSD),2))/month)" -ForegroundColor Green
             }
             else {
                 # Check if performance allows downgrade but cost doesn't make sense
@@ -917,6 +980,11 @@ $results = foreach ($disk in $allDisks) {
         }
     }
     
+    # Determine metrics availability status
+    $metricsStatus = if ($telemetry.Samples.Count -eq 0) {
+        if (-not $disk.managedBy) { "Unattached" } else { "No Metrics" }
+    } else { "OK" }
+    
     # Output analysis result for this disk
     [pscustomobject]@{
         Disk=$disk.name
@@ -928,6 +996,7 @@ $results = foreach ($disk in $allDisks) {
         BillingTier=$billingTierName
         CustomSize=if ($isCustomSize) { "Yes" } else { "No" }
         Samples=$telemetry.Samples.Count
+        MetricsStatus=$metricsStatus
         PercentIOPSAbove=[math]::Round($percentIOPS*100,2)
         PercentMBpsAbove=[math]::Round($percentMBps*100,2)
         Transactions=$telemetry.Transactions
@@ -961,891 +1030,30 @@ Write-Host "`nAnalysis complete!" -ForegroundColor Green
 
 #endregion
 
-#region HTML Generation
 
-<#
-.SYNOPSIS
-    Generates HTML report with styled table and highlighting for optimization opportunities.
-#>
-function New-HtmlReport {
-    param($Results, [string]$OutputPath)
-    
-    $html = @"
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Azure Managed Disk Analysis Report</title>
-    <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-        
-        body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            padding: 20px;
-            min-height: 100vh;
-        }
-        
-        .container {
-            max-width: 100%;
-            margin: 0 auto;
-            background: white;
-            border-radius: 10px;
-            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
-            overflow: hidden;
-        }
-        
-        .header {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 30px;
-            text-align: center;
-        }
-        
-        .header h1 {
-            font-size: 2.5em;
-            margin-bottom: 10px;
-        }
-        
-        .header p {
-            font-size: 1.1em;
-            opacity: 0.9;
-        }
-        
-        .stats {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 20px;
-            padding: 30px;
-            background: #f8f9fa;
-            border-bottom: 3px solid #e9ecef;
-        }
-        
-        .stat-card {
-            background: white;
-            padding: 20px;
-            border-radius: 8px;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-            text-align: center;
-        }
-        
-        .stat-card .number {
-            font-size: 2.5em;
-            font-weight: bold;
-            color: #667eea;
-            margin-bottom: 5px;
-        }
-        
-        .stat-card .label {
-            color: #6c757d;
-            font-size: 0.9em;
-            text-transform: uppercase;
-            letter-spacing: 1px;
-        }
-        
-        .legend {
-            padding: 20px 30px;
-            background: #fff3cd;
-            border-bottom: 3px solid #ffc107;
-        }
-        
-        .legend h3 {
-            margin-bottom: 15px;
-            color: #856404;
-        }
-        
-        .legend-items {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 20px;
-        }
-        
-        .legend-item {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-        }
-        
-        .legend-color {
-            width: 30px;
-            height: 20px;
-            border-radius: 4px;
-            border: 1px solid #ddd;
-        }
-        
-        .table-container {
-            padding: 30px;
-            overflow-x: auto;
-        }
-        
-        table {
-            width: 100%;
-            border-collapse: collapse;
-            font-size: 0.9em;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-        }
-        
-        thead {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            position: sticky;
-            top: 0;
-            z-index: 10;
-        }
-        
-        th {
-            padding: 15px 12px;
-            text-align: left;
-            font-weight: 600;
-            text-transform: uppercase;
-            font-size: 0.85em;
-            letter-spacing: 0.5px;
-            cursor: pointer;
-            user-select: none;
-            position: relative;
-        }
-        
-        th:hover {
-            background: rgba(255,255,255,0.1);
-        }
-        
-        th.sortable::after {
-            content: ' ⇅';
-            opacity: 0.3;
-            font-size: 0.8em;
-        }
-        
-        th.sort-asc::after {
-            content: ' ▲';
-            opacity: 1;
-        }
-        
-        th.sort-desc::after {
-            content: ' ▼';
-            opacity: 1;
-        }
-        
-        .filter-row {
-            background: #f8f9fa;
-        }
-        
-        .filter-row th {
-            padding: 8px;
-            cursor: default;
-        }
-        
-        .filter-row th:hover {
-            background: #f8f9fa;
-        }
-        
-        .filter-input {
-            width: 100%;
-            padding: 6px 8px;
-            border: 1px solid #ced4da;
-            border-radius: 4px;
-            font-size: 0.85em;
-            font-family: 'Segoe UI', sans-serif;
-        }
-        
-        .filter-input:focus {
-            outline: none;
-            border-color: #667eea;
-            box-shadow: 0 0 0 2px rgba(102, 126, 234, 0.2);
-        }
-        
-        .filter-controls {
-            padding: 15px 30px;
-            background: #f8f9fa;
-            border-bottom: 2px solid #dee2e6;
-            display: flex;
-            gap: 15px;
-            align-items: center;
-            flex-wrap: wrap;
-        }
-        
-        .filter-controls button {
-            padding: 8px 16px;
-            border: none;
-            border-radius: 4px;
-            background: #667eea;
-            color: white;
-            cursor: pointer;
-            font-size: 0.9em;
-            font-weight: 600;
-            transition: background 0.2s;
-        }
-        
-        .filter-controls button:hover {
-            background: #5568d3;
-        }
-        
-        .filter-controls .results-count {
-            margin-left: auto;
-            color: #6c757d;
-            font-weight: 600;
-        }
-        
-        td {
-            padding: 12px;
-            border-bottom: 1px solid #e9ecef;
-        }
-        
-        tbody tr {
-            transition: all 0.2s ease;
-        }
-        
-        tbody tr:hover {
-            transform: scale(1.01);
-            box-shadow: 0 2px 8px rgba(0,0,0,0.2);
-            filter: brightness(1.05);
-        }
-        
-        /* Row highlighting based on status */
-        /* Savings-based highlighting (highest priority) */
-        .savings-critical {
-            background: #ff6b6b !important;  /* Bright red - >$100/month */
-            border-left: 4px solid #c92a2a;
-            color: #fff;
-        }
-        
-        .savings-critical td {
-            color: #fff;
-        }
-        
-        .savings-critical .badge {
-            filter: brightness(1.1);
-        }
-        
-        .savings-high {
-            background: #ffcccc !important;  /* Light red - $25-$100/month */
-            border-left: 4px solid #e74c3c;
-            color: #2c1a1a;
-        }
-        
-        .savings-medium {
-            background: #fff9db !important;  /* Light yellow - <$25/month */
-            border-left: 4px solid #f1c40f;
-            color: #2c2416;
-        }
-        
-        .inefficient-size {
-            background: #ffe5cc !important;  /* Light orange - Inefficient/Needs Review */
-            border-left: 4px solid #e67e22;
-            color: #2c1f16;
-        }
-        
-        .stay-ok {
-            background: #d4edda !important;  /* Light green - Stay */
-            border-left: 4px solid #28a745;
-            color: #1e4620;
-        }
-        
-        /* Legacy row classes (lower priority) */
-        .upgrade-needed {
-            background: #fff3cd !important;
-            border-left: 4px solid #ffc107;
-            color: #2c2416;
-        }
-        
-        .downgrade-opportunity {
-            background: #d1ecf1 !important;
-            border-left: 4px solid #17a2b8;
-            color: #1a3e47;
-        }
-        
-        .custom-size {
-            background: #e7e8ff !important;
-            border-left: 4px solid #6c5ce7;
-            color: #2c2647;
-        }
-        
-        .tier-not-handled {
-            background: #f0f0f0 !important;
-            border-left: 4px solid #95a5a6;
-            color: #2c3e50;
-        }
-        
-        .badge {
-            display: inline-block;
-            padding: 4px 8px;
-            border-radius: 4px;
-            font-size: 0.85em;
-            font-weight: 600;
-        }
-        
-        .badge-warning {
-            background: #ffc107;
-            color: #856404;
-        }
-        
-        .badge-info {
-            background: #17a2b8;
-            color: white;
-        }
-        
-        .badge-danger {
-            background: #dc3545;
-            color: white;
-        }
-        
-        .badge-success {
-            background: #28a745;
-            color: white;
-        }
-        
-        .badge-secondary {
-            background: #6c757d;
-            color: white;
-        }
-        
-        .badge-purple {
-            background: #6c5ce7;
-            color: white;
-        }
-        
-        .footer {
-            padding: 20px;
-            text-align: center;
-            background: #f8f9fa;
-            color: #6c757d;
-            font-size: 0.9em;
-        }
-        
-        .number-cell {
-            text-align: right;
-            font-family: 'Courier New', monospace;
-        }
-        
-        .percent-high {
-            color: #dc3545;
-            font-weight: bold;
-        }
-        
-        .percent-medium {
-            color: #ffc107;
-            font-weight: bold;
-        }
-        
-        .percent-low {
-            color: #28a745;
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header">
-            <h1>🔍 Azure Managed Disk Analysis</h1>
-            <p>Generated on $(Get-Date -Format "MMMM dd, yyyy 'at' HH:mm:ss")</p>
-        </div>
-
-"@
-
-    # Calculate statistics
-    $totalDisks = $Results.Count
-    $stayCount = ($Results | Where-Object { $_.Decision -eq "Stay" -or $_.Decision -eq "Stay (latency-sensitive)" }).Count
-    
-    # Calculate savings categories
-    $criticalSavings = 0
-    $highSavings = 0
-    $mediumSavings = 0
-    $inefficientCount = 0
-    
-    foreach ($result in $Results) {
-        $potentialSavings = 0
-        if ($result.Decision -like "*Upgrade*Premium*" -or $result.Decision -like "*Downgrade*") {
-            if ($result.CostDiffSSDtoBestPremium -lt 0) {
-                $potentialSavings = [math]::Abs($result.CostDiffSSDtoBestPremium)
-            } elseif ($result.CostSavingsHDDtoSSD -gt 0) {
-                $potentialSavings = $result.CostSavingsHDDtoSSD
-            }
-        }
-        
-        if ($potentialSavings -gt 100) { $criticalSavings++ }
-        elseif ($potentialSavings -gt 25) { $highSavings++ }
-        elseif ($potentialSavings -gt 0) { $mediumSavings++ }
-        
-        # Check inefficiency
-        if ($result.BillingTier -ne "N/A" -and $result.BillingTier -ne "Custom" -and $result.CustomSize -eq "Yes") {
-            $tierBoundaries = @(32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32767)
-            $currentTierIndex = $tierBoundaries.IndexOf([int]$result.BilledSizeGiB)
-            if ($currentTierIndex -gt 0) {
-                $lowerTierSize = $tierBoundaries[$currentTierIndex - 1]
-                $threshold = $lowerTierSize * 1.2
-                if ($result.ActualSizeGiB -le $threshold) {
-                    $inefficientCount++
-                }
-            }
-        }
-    }
-    
-$html += @"
-        <div class="stats">
-            <div class="stat-card">
-                <div class="number">$totalDisks</div>
-                <div class="label">Total Disks</div>
-            </div>
-            <div class="stat-card">
-                <div class="number" style="color: #ff6b6b;">$criticalSavings</div>
-                <div class="label">Critical Savings (>`$100/mo)</div>
-            </div>
-            <div class="stat-card">
-                <div class="number" style="color: #e74c3c;">$highSavings</div>
-                <div class="label">High Savings (`$25-`$100/mo)</div>
-            </div>
-            <div class="stat-card">
-                <div class="number" style="color: #f1c40f;">$mediumSavings</div>
-                <div class="label">Medium Savings (<`$25/mo)</div>
-            </div>
-            <div class="stat-card">
-                <div class="number" style="color: #e67e22;">$inefficientCount</div>
-                <div class="label">Inefficient Sizing</div>
-            </div>
-            <div class="stat-card">
-                <div class="number" style="color: #28a745;">$stayCount</div>
-                <div class="label">Optimal</div>
-            </div>
-        </div>
-        
-        <div class="legend">
-            <h3>📋 Row Color Legend</h3>
-            <div class="legend-items">
-                <div class="legend-item">
-                    <div class="legend-color" style="background: #ff6b6b; border-left: 4px solid #c92a2a;"></div>
-                    <span><strong>Critical Savings</strong> - Potential savings >`$100/month</span>
-                </div>
-                <div class="legend-item">
-                    <div class="legend-color" style="background: #ffcccc; border-left: 4px solid #e74c3c;"></div>
-                    <span><strong>High Savings</strong> - Potential savings `$25-`$100/month</span>
-                </div>
-                <div class="legend-item">
-                    <div class="legend-color" style="background: #fff9db; border-left: 4px solid #f1c40f;"></div>
-                    <span><strong>Medium Savings</strong> - Potential savings <`$25/month</span>
-                </div>
-                <div class="legend-item">
-                    <div class="legend-color" style="background: #ffe5cc; border-left: 4px solid #e67e22;"></div>
-                    <span><strong>Inefficient/Needs Review</strong> - Within 20% of lower tier (wasting money)</span>
-                </div>
-                <div class="legend-item">
-                    <div class="legend-color" style="background: #d4edda; border-left: 4px solid #28a745;"></div>
-                    <span><strong>Stay</strong> - Disk is optimally sized</span>
-                </div>
-            </div>
-        </div>
-        
-        <div class="filter-controls">
-            <button onclick="clearAllFilters()">Clear Filters</button>
-            <button onclick="exportToCSV()">Export Filtered to CSV</button>
-            <span class="results-count">Showing <span id="visibleCount">0</span> of <span id="totalCount">0</span> disks</span>
-        </div>
-        
-        <div class="table-container">
-            <table id="diskTable">
-                <thead>
-                    <tr>
-                        <th class="sortable" onclick="sortTable(0)">Disk Name</th>
-                        <th class="sortable" onclick="sortTable(1)">Resource Group</th>
-                        <th class="sortable" onclick="sortTable(2)">SKU</th>
-                        <th class="sortable" onclick="sortTable(3)">Actual Size</th>
-                        <th class="sortable" onclick="sortTable(4)">Billed Size</th>
-                        <th class="sortable" onclick="sortTable(5)">Tier</th>
-                        <th class="sortable" onclick="sortTable(6)">Custom</th>
-                        <th class="sortable" onclick="sortTable(7)">IOPS Above %</th>
-                        <th class="sortable" onclick="sortTable(8)">MBps Above %</th>
-                        <th class="sortable" onclick="sortTable(9)">Avg Latency (ms)</th>
-                        <th class="sortable" onclick="sortTable(10)">Transactions</th>
-                        <th class="sortable" onclick="sortTable(11)">Cost Diff</th>
-                        <th class="sortable" onclick="sortTable(12)">Decision</th>
-                    </tr>
-                    <tr class="filter-row">
-                        <th><input type="text" class="filter-input" placeholder="Filter..." onkeyup="filterTable()"></th>
-                        <th><input type="text" class="filter-input" placeholder="Filter..." onkeyup="filterTable()"></th>
-                        <th><input type="text" class="filter-input" placeholder="Filter..." onkeyup="filterTable()"></th>
-                        <th><input type="text" class="filter-input" placeholder="Filter..." onkeyup="filterTable()"></th>
-                        <th><input type="text" class="filter-input" placeholder="Filter..." onkeyup="filterTable()"></th>
-                        <th><input type="text" class="filter-input" placeholder="Filter..." onkeyup="filterTable()"></th>
-                        <th><input type="text" class="filter-input" placeholder="Filter..." onkeyup="filterTable()"></th>
-                        <th><input type="text" class="filter-input" placeholder="Filter..." onkeyup="filterTable()"></th>
-                        <th><input type="text" class="filter-input" placeholder="Filter..." onkeyup="filterTable()"></th>
-                        <th><input type="text" class="filter-input" placeholder="Filter..." onkeyup="filterTable()"></th>
-                        <th><input type="text" class="filter-input" placeholder="Filter..." onkeyup="filterTable()"></th>
-                        <th><input type="text" class="filter-input" placeholder="Filter..." onkeyup="filterTable()"></th>
-                        <th><input type="text" class="filter-input" placeholder="Filter..." onkeyup="filterTable()"></th>
-                    </tr>
-                </thead>
-                <tbody>
-
-"@
-
-    foreach ($result in ($Results | Sort-Object Subscription, ResourceGroup, Disk)) {
-        # Determine row class based on conditions
-        $rowClass = ""
-        $isInefficient = $false
-        
-        # Calculate potential savings for this disk
-        $potentialSavings = 0
-        if ($result.Decision -like "*Upgrade*Premium*" -or $result.Decision -like "*Downgrade*") {
-            # Use the best premium comparison or HDD/SSD savings
-            if ($result.CostDiffSSDtoBestPremium -lt 0) {
-                $potentialSavings = [math]::Abs($result.CostDiffSSDtoBestPremium)
-            } elseif ($result.CostSavingsHDDtoSSD -gt 0) {
-                $potentialSavings = $result.CostSavingsHDDtoSSD
-            }
-        }
-        
-        # Check if within 20% of lower tier
-        if ($result.BillingTier -ne "N/A" -and $result.BillingTier -ne "Custom" -and $result.CustomSize -eq "Yes") {
-            $billedSize = $result.BilledSizeGiB
-            $actualSize = $result.ActualSizeGiB
-            
-            # Define tier boundaries for checking
-            $tierBoundaries = @(32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32767)
-            $currentTierIndex = $tierBoundaries.IndexOf([int]$billedSize)
-            
-            if ($currentTierIndex -gt 0) {
-                $lowerTierSize = $tierBoundaries[$currentTierIndex - 1]
-                $threshold = $lowerTierSize * 1.2
-                if ($actualSize -le $threshold) {
-                    $isInefficient = $true
-                    $rowClass = "inefficient-size"
-                }
-            }
-        }
-        
-        # Assign row class based on priority: savings > inefficiency > decision type
-        if ($potentialSavings -gt 100) {
-            $rowClass = "savings-critical"  # >$100/month - bright red
-        } elseif ($potentialSavings -gt 25) {
-            $rowClass = "savings-high"  # >$25/month - light red
-        } elseif ($potentialSavings -gt 0 -and $potentialSavings -le 25) {
-            $rowClass = "savings-medium"  # <$25/month - light yellow
-        } elseif ($isInefficient) {
-            $rowClass = "inefficient-size"  # Inefficient - light orange
-        } elseif ($result.Decision -eq "Stay" -or $result.Decision -eq "Stay (latency-sensitive)") {
-            $rowClass = "stay-ok"  # Stay - light green
-        } elseif ($result.Decision -like "*Upgrade*") {
-            $rowClass = "upgrade-needed"
-        } elseif ($result.Decision -like "*Downgrade*") {
-            $rowClass = "downgrade-opportunity"
-        } elseif ($result.Decision -eq "Tier not handled") {
-            $rowClass = "tier-not-handled"
-        } elseif ($result.CustomSize -eq "Yes" -and $rowClass -eq "") {
-            $rowClass = "custom-size"
-        }
-        
-        # Format percentages with color
-        $iopsClass = if ($result.PercentIOPSAbove -gt 5) { "percent-high" } elseif ($result.PercentIOPSAbove -gt 1) { "percent-medium" } else { "percent-low" }
-        $mbpsClass = if ($result.PercentMBpsAbove -gt 5) { "percent-high" } elseif ($result.PercentMBpsAbove -gt 1) { "percent-medium" } else { "percent-low" }
-        
-        # Format latency with color (green <5ms, yellow 5-10ms, red >10ms)
-        if ($result.AvgLatencyMs -gt 0) {
-            $latencyDisplay = "$($result.AvgLatencyMs) ms"
-            $latencyClass = if ($result.AvgLatencyMs -gt 10) { "percent-high" } 
-                            elseif ($result.AvgLatencyMs -gt 5) { "percent-medium" } 
-                            else { "percent-low" }
-        } else {
-            $latencyDisplay = "-"
-            $latencyClass = ""
-        }
-        
-        # Create decision badge
-        $decisionBadge = ""
-        if ($result.Decision -like "*Upgrade*") {
-            $decisionBadge = "<span class='badge badge-warning'>⬆️ $($result.Decision)</span>"
-        } elseif ($result.Decision -like "*Downgrade*") {
-            $decisionBadge = "<span class='badge badge-info'>⬇️ $($result.Decision)</span>"
-        } elseif ($result.Decision -eq "Stay (latency-sensitive)") {
-            $decisionBadge = "<span class='badge badge-success'>✅ Stay (latency-sensitive)</span>"
-        } elseif ($result.Decision -eq "Stay") {
-            $decisionBadge = "<span class='badge badge-success'>✅ $($result.Decision)</span>"
-        } elseif ($result.Decision -eq "Tier not handled") {
-            $decisionBadge = "<span class='badge badge-secondary'>⚠️ $($result.Decision)</span>"
-        } else {
-            $decisionBadge = "<span class='badge badge-secondary'>$($result.Decision)</span>"
-        }
-        
-        # Add inefficiency warning
-        if ($isInefficient) {
-            $decisionBadge = "<span class='badge badge-danger'>💸 Inefficient Size</span> " + $decisionBadge
-        }
-        
-        # Custom size badge
-        $customBadge = if ($result.CustomSize -eq "Yes") { "<span class='badge badge-purple'>Custom</span>" } else { "" }
-        
-        # Format cost with color highlighting if high
-        $costClass = if ($result.EstMonthlyTotalCost -gt 10) { "percent-high" } elseif ($result.EstMonthlyTotalCost -gt 1) { "percent-medium" } else { "" }
-        $costDisplay = if ($result.EstMonthlyTotalCost -gt 0) { "`$$($result.EstMonthlyTotalCost.ToString('F2'))" } else { "-" }
-        
-        # Burst operations display
-        $burstDisplay = if ($result.BurstOperations -gt 0) { 
-            "<span class='badge badge-warning'>$([math]::Round($result.BurstOperations, 0).ToString("N0"))</span>" 
-        } else { 
-            "-" 
-        }
-        
-        # Cost Difference display - context-aware based on disk type and recommendation
-        $costDiffClass = ""
-        $costDiffDisplay = "-"
-        $costDiffSortValue = 0  # Numeric value for sorting
-        
-        # Determine what comparison to show based on SKU and recommendation
-        if ($result.SKU -eq "StandardSSD_LRS" -and $result.Decision -like "*Premium*") {
-            # Standard SSD with Premium upgrade recommendation - show best Premium option vs SSD comparison
-            $costDiffSortValue = $result.CostDiffSSDtoBestPremium
-            $absDiff = [math]::Abs($result.CostDiffSSDtoBestPremium)
-            $premiumLabel = $result.BestPremiumOption
-            
-            if ($result.CostDiffSSDtoBestPremium -lt -5) {
-                # Premium would save significant money
-                $costDiffClass = "percent-low"
-                $costDiffDisplay = "<span class='badge badge-success'>$premiumLabel saves `$$($absDiff.ToString('F2'))</span>"
-            } elseif ($result.CostDiffSSDtoBestPremium -lt 0) {
-                # Premium would save some money
-                $costDiffClass = "percent-low"
-                $costDiffDisplay = "<span class='badge badge-info'>$premiumLabel saves `$$($absDiff.ToString('F2'))</span>"
-            } elseif ($result.CostDiffSSDtoBestPremium -le 10) {
-                # Premium slightly more expensive
-                $costDiffClass = "percent-medium"
-                $costDiffDisplay = "<span class='badge badge-warning'>$premiumLabel +`$$($absDiff.ToString('F2'))</span>"
-            } else {
-                # Premium significantly more expensive
-                $costDiffClass = "percent-high"
-                $costDiffDisplay = "<span class='badge badge-danger'>$premiumLabel +`$$($absDiff.ToString('F2'))</span>"
-            }
-        }
-        elseif (($result.SKU -eq "Standard_LRS" -or $result.SKU -eq "StandardSSD_LRS" -or $result.Decision -like "*Downgrade*HDD*" -or $result.Decision -like "*Standard SSD*") -and $result.CostSavingsHDDtoSSD -ne 0) {
-            # HDD vs Standard SSD comparison
-            $absDiff = [math]::Abs($result.CostSavingsHDDtoSSD)
-            $costDiffSortValue = $result.CostSavingsHDDtoSSD  # Use actual value for sorting (positive = HDD costs more)
-            
-            if ($result.CostSavingsHDDtoSSD -gt 5) {
-                # HDD significantly more expensive - recommend SSD
-                $costDiffClass = "percent-high"
-                $costDiffDisplay = "<span class='badge badge-danger'>HDD +`$$($absDiff.ToString('F2'))</span>"
-            } elseif ($result.CostSavingsHDDtoSSD -gt 0) {
-                # HDD slightly more expensive
-                $costDiffClass = "percent-medium"
-                $costDiffDisplay = "<span class='badge badge-warning'>HDD +`$$($absDiff.ToString('F2'))</span>"
-            } elseif ($result.CostSavingsHDDtoSSD -lt -5) {
-                # SSD significantly more expensive - HDD is cheaper
-                $costDiffClass = ""
-                $costDiffDisplay = "<span class='badge badge-info'>SSD +`$$($absDiff.ToString('F2'))</span>"
-            } else {
-                # SSD slightly more expensive
-                $costDiffClass = ""
-                $costDiffDisplay = "SSD +`$$($absDiff.ToString('F2'))"
-            }
-        }
-                $html += @"
-                    <tr class="$rowClass">
-                        <td><strong>$($result.Disk)</strong></td>
-                        <td>$($result.ResourceGroup)</td>
-                        <td>$($result.SKU)</td>
-                        <td class="number-cell">$($result.ActualSizeGiB) GiB</td>
-                        <td class="number-cell">$($result.BilledSizeGiB) GiB</td>
-                        <td>$($result.BillingTier)</td>
-                        <td>$customBadge</td>
-                        <td class="number-cell $iopsClass">$($result.PercentIOPSAbove)%</td>
-                        <td class="number-cell $mbpsClass">$($result.PercentMBpsAbove)%</td>
-                        <td class="number-cell $latencyClass">$latencyDisplay</td>
-                        <td class="number-cell">$([math]::Round($result.Transactions, 0).ToString("N0"))</td>
-                        <td class="number-cell $costDiffClass" data-sort-value="$costDiffSortValue">$costDiffDisplay</td>
-                        <td>$decisionBadge</td>
-                    </tr>
-
-"@
-    }
-    
-$html += @"
-                </tbody>
-            </table>
-        </div>
-        
-        <div class="footer">
-            <p>Azure Managed Disk Analysis Report | Generated by Emergent Software</p>
-            <p>Analysis Period: $($analysisWindowStart.ToString('yyyy-MM-dd HH:mm')) to $($analysisWindowEnd.ToString('yyyy-MM-dd HH:mm')) ($DaysToInspect days)</p>
-            $(if ($DaysToInspect -lt 30) { "<p><strong>Note:</strong> All cost estimates are projected to 30-day monthly values based on observed usage patterns.</p>" } else { "" })
-        </div>
-    </div>
-    
-    <script>
-        // Initialize counts on page load
-        window.addEventListener('DOMContentLoaded', function() {
-            updateCount();
-        });
-        
-        // Sort table by column
-        let sortDirection = {};
-        function sortTable(columnIndex) {
-            const table = document.getElementById('diskTable');
-            const tbody = table.tBodies[0];
-            const rows = Array.from(tbody.rows);
-            
-            // Toggle sort direction
-            if (!sortDirection[columnIndex]) sortDirection[columnIndex] = 'asc';
-            else sortDirection[columnIndex] = sortDirection[columnIndex] === 'asc' ? 'desc' : 'asc';
-            
-            const isAscending = sortDirection[columnIndex] === 'asc';
-            
-            // Remove sort indicators from all headers
-            const headers = table.querySelectorAll('thead tr:first-child th');
-            headers.forEach(th => {
-                th.classList.remove('sort-asc', 'sort-desc');
-            });
-            
-            // Add sort indicator to current header
-            headers[columnIndex].classList.add(isAscending ? 'sort-asc' : 'sort-desc');
-            
-            // Sort rows
-            rows.sort((a, b) => {
-                let aValue = a.cells[columnIndex].textContent.trim();
-                let bValue = b.cells[columnIndex].textContent.trim();
-                
-                // Check for data-sort-value attribute (used for Cost Diff column)
-                const aSortAttr = a.cells[columnIndex].getAttribute('data-sort-value');
-                const bSortAttr = b.cells[columnIndex].getAttribute('data-sort-value');
-                
-                if (aSortAttr !== null && bSortAttr !== null) {
-                    const aNum = parseFloat(aSortAttr);
-                    const bNum = parseFloat(bSortAttr);
-                    return isAscending ? aNum - bNum : bNum - aNum;
-                }
-                
-                // Remove common formatting for numeric comparison
-                aValue = aValue.replace(/[,$%]/g, '').replace(' GiB', '');
-                bValue = bValue.replace(/[,$%]/g, '').replace(' GiB', '');
-                
-                // Try numeric comparison first
-                const aNum = parseFloat(aValue);
-                const bNum = parseFloat(bValue);
-                
-                if (!isNaN(aNum) && !isNaN(bNum)) {
-                    return isAscending ? aNum - bNum : bNum - aNum;
-                }
-                
-                // Fall back to string comparison
-                return isAscending ? 
-                    aValue.localeCompare(bValue) : 
-                    bValue.localeCompare(aValue);
-            });
-            
-            // Reappend sorted rows
-            rows.forEach(row => tbody.appendChild(row));
-        }
-        
-        // Filter table based on all filter inputs
-        function filterTable() {
-            const table = document.getElementById('diskTable');
-            const tbody = table.tBodies[0];
-            const filterRow = table.querySelectorAll('.filter-row input');
-            const filters = Array.from(filterRow).map(input => input.value.toLowerCase());
-            
-            let visibleCount = 0;
-            
-            Array.from(tbody.rows).forEach(row => {
-                let showRow = true;
-                
-                filters.forEach((filter, index) => {
-                    if (filter && row.cells[index]) {
-                        const cellText = row.cells[index].textContent.toLowerCase();
-                        if (!cellText.includes(filter)) {
-                            showRow = false;
-                        }
-                    }
-                });
-                
-                row.style.display = showRow ? '' : 'none';
-                if (showRow) visibleCount++;
-            });
-            
-            updateCount(visibleCount);
-        }
-        
-        // Clear all filter inputs
-        function clearAllFilters() {
-            const filterInputs = document.querySelectorAll('.filter-input');
-            filterInputs.forEach(input => input.value = '');
-            filterTable();
-        }
-        
-        // Update visible/total count
-        function updateCount(visible) {
-            const table = document.getElementById('diskTable');
-            const tbody = table.tBodies[0];
-            const total = tbody.rows.length;
-            
-            if (visible === undefined) {
-                visible = Array.from(tbody.rows).filter(row => row.style.display !== 'none').length;
-            }
-            
-            document.getElementById('visibleCount').textContent = visible;
-            document.getElementById('totalCount').textContent = total;
-        }
-        
-        // Export filtered results to CSV
-        function exportToCSV() {
-            const table = document.getElementById('diskTable');
-            const headers = Array.from(table.querySelectorAll('thead tr:first-child th'))
-                .map(th => th.textContent.trim().replace(/[⇅▲▼]/g, '').trim());
-            
-            const visibleRows = Array.from(table.tBodies[0].rows)
-                .filter(row => row.style.display !== 'none');
-            
-            let csv = headers.map(h => '"' + h + '"').join(',') + '\\n';
-            
-            visibleRows.forEach(row => {
-                const rowData = Array.from(row.cells).map(cell => {
-                    let text = cell.textContent.trim();
-                    // Remove emoji and extra whitespace
-                    text = text.replace(/[🔍⬆️⬇️✅⚠️💸]/g, '').trim();
-                    return '"' + text.replace(/"/g, '""') + '"';
-                });
-                csv += rowData.join(',') + '\\n';
-            });
-            
-            // Download CSV
-            const blob = new Blob([csv], { type: 'text/csv' });
-            const url = window.URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = 'disk-analysis-filtered-' + new Date().toISOString().slice(0,10) + '.csv';
-            a.click();
-            window.URL.revokeObjectURL(url);
-        }
-    </script>
-</body>
-</html>
-"@
-    
-    $html | Set-Content -Path $OutputPath -Encoding UTF8
-}
-
-#endregion
-
-#region Output
 
 # Display results
 Write-Host "`n=== Analysis Results ===" -ForegroundColor Cyan
 $results | Sort-Object Subscription, ResourceGroup, Disk | Format-Table -AutoSize
 
-# Export to JSON, CSV, and HTML with timestamp
+# Display results
+Write-Host "`n=== Analysis Results ===" -ForegroundColor Cyan
+$results | Sort-Object Subscription, ResourceGroup, Disk | Format-Table -AutoSize
+
+# Export to JSON and CSV with timestamp
 Write-Host "Exporting results..." -ForegroundColor Cyan
 $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $jsonPath = Join-Path $scriptDir "$OutputPrefix-$timestamp.json"
 $csvPath = Join-Path $scriptDir "$OutputPrefix-$timestamp.csv"
-$htmlPath = Join-Path $scriptDir "$OutputPrefix-$timestamp.html"
 
 $results | ConvertTo-Json -Depth 4 | Set-Content $jsonPath
 $results | Export-Csv $csvPath -NoTypeInformation
-New-HtmlReport -Results $results -OutputPath $htmlPath
 
 Write-Host "  JSON: $jsonPath" -ForegroundColor Green
 Write-Host "  CSV:  $csvPath" -ForegroundColor Green
-Write-Host "  HTML: $htmlPath" -ForegroundColor Green
+Write-Host ""
+Write-Host "To generate an HTML report, run:" -ForegroundColor Cyan
+Write-Host "  .\New-DiskAnalysisHtmlReport.ps1 -JsonPath '$jsonPath'" -ForegroundColor Yellow
 
 # Calculate and display execution time
 $scriptEndTime = Get-Date
@@ -1857,5 +1065,3 @@ $timeString = if ($executionTime.TotalMinutes -ge 1) {
 }
 
 Write-Host "`n⏱️  Total execution time: $timeString" -ForegroundColor Magenta
-
-#endregion

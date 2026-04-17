@@ -33,6 +33,19 @@ Analyzes Azure Recovery Services Vaults backup configurations to identify high-c
 
 [📖 Full Documentation](azure-recovery-services-vault-analysis/README.md)
 
+### 3. Virtual Machine Analysis
+**Location:** `azure-vm-analysis/`
+
+Analyzes Azure Virtual Machines for Advisor recommendations, host utilization, and VM pricing comparisons across pay-as-you-go and reserved instance options.
+
+**Key Features:**
+- Azure Advisor Cost and Performance recommendation collection per VM
+- Host-metric utilization analysis using Azure Monitor CPU, network, disk, and B-series credit metrics
+- Improved PAYG, 1-year RI, and 3-year RI pricing comparison with Windows OS license modeled when applicable
+- Top-3 B-series, D-series, and E-series target SKU recommendations based on utilization and regional SKU availability
+- Self-contained HTML report with sorting, filtering, visible-row CSV export, and rationale sections below each VM row
+- Config-driven execution with inline-documented settings and report behavior
+
 ## 🚀 Quick Start
 
 ### Prerequisites
@@ -109,6 +122,31 @@ Multi-subscription backup analysis:
     -OutputPrefix "monthly-backup-report"
 ```
 
+### Virtual Machine Analysis
+
+Run with the sample config file:
+```powershell
+cd azure-vm-analysis
+.\azure-vm-assessment.ps1 -ConfigPath .\azure-vm-assessment.config.jsonc
+```
+
+Run with config but override a few values from the command line:
+```powershell
+.\azure-vm-assessment.ps1 `
+    -ConfigPath .\azure-vm-assessment.config.jsonc `
+    -DaysToInspect 1 `
+    -VMName vmadconnect001 `
+    -OutputPrefix vm-analysis-smoke
+```
+
+Run fully from parameters without a config file:
+```powershell
+.\azure-vm-assessment.ps1 `
+    -SubscriptionId "12345678-1234-1234-1234-123456789012" `
+    -DaysToInspect 14 `
+    -OutputPrefix "vm-analysis-weekly"
+```
+
 ## 📈 Output Reports
 
 All tools generate three types of reports:
@@ -177,6 +215,39 @@ All tools generate three types of reports:
 | `SubscriptionId` | String[] | Current | Azure subscription ID(s) to analyze |
 | `OutputPrefix` | String | "vault-analysis" | Prefix for output files |
 
+### VM Analysis Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `ConfigPath` | String | None | Path to a JSON or JSONC config file |
+| `DaysToInspect` | Int | 14 | Days of Azure Monitor history to analyze |
+| `SubscriptionId` | String[] | Current | Azure subscription ID(s) to analyze |
+| `OutputPrefix` | String | "vm-analysis" | Prefix for generated output file names |
+| `VMName` | String[] | All | Optional VM name filter |
+| `RefreshAdvisor` | Switch | False | Refresh Advisor recommendations during execution |
+| `UnderutilizedCpuAverageThreshold` | Double | 10 | CPU average threshold for underutilization |
+| `UnderutilizedCpuP95Threshold` | Double | 25 | CPU P95 threshold for underutilization |
+| `OverutilizedCpuAverageThreshold` | Double | 65 | CPU average threshold for overutilization |
+| `OverutilizedCpuP95Threshold` | Double | 85 | CPU P95 threshold for overutilization |
+| `LowNetworkAverageThresholdMBps` | Double | 0.5 | Network MB/s threshold for low activity |
+| `LowDiskAverageThresholdMBps` | Double | 1.0 | Disk MB/s threshold for low activity |
+| `BurstableLowCreditsThreshold` | Double | 20 | B-series CPU credits threshold |
+| `MinimumSamplesForClassification` | Int | 12 | Minimum CPU samples required to classify a VM |
+
+### VM Analysis Config Notes
+
+- The sample config file is at `azure-vm-analysis/azure-vm-assessment.config.jsonc`.
+- Use `.jsonc` when you want inline comments. Use plain `.json` only if you remove comments.
+- Command-line parameters override config values when both are provided.
+- Report behavior is configured under the `Report` object, including output directory, output format toggles, and HTML report text.
+- Current-SKU pricing now records PAYG and reservation matches separately, so `RI meters not found` should only appear when the reservation price really is unavailable.
+- Windows pricing includes OS license only when the VM is not using a license benefit such as Azure Hybrid Benefit. For reservations, the script derives the monthly Windows uplift from the difference between Windows PAYG and base compute PAYG, then adds that uplift to the reservation compute monthly estimate.
+- The HTML report uses the recommended target SKU for the `Cost Comparison` column when a target SKU is available.
+- Aggregate cards show estimated monthly cost for PAYG, 1YR RI, and 3YR RI rather than visible savings totals.
+- CPU Avg % and CPU P95 % were removed from the main table and are now surfaced in the expandable rationale section under `Data`.
+- The HTML report includes a best target SKU summary in the main grid and a top-3 B/D/E candidate table inside each VM detail panel.
+- SKU recommendations prefer the current VM family first and only switch families when the utilization profile strongly supports it.
+
 ## 📁 Repository Structure
 
 ```
@@ -189,6 +260,11 @@ azure-assessment/
 │   ├── azure-managed-disk-telemetry-analysis.ps1 # Main disk analysis script
 │   ├── disk-specs.json                          # Disk SKU specifications
 │   └── disk-analysis-*.{html,csv,json}          # Generated reports
+│
+├── azure-vm-analysis/
+│   ├── azure-vm-assessment.ps1                  # Main VM analysis script
+│   ├── azure-vm-assessment.config.jsonc         # Sample annotated config file
+│   └── vm-analysis-*.{html,csv,json}            # Generated reports
 │
 └── azure-recovery-services-vault-analysis/
     ├── README.md                                # Vault analysis documentation
