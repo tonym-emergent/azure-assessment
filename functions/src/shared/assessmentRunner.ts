@@ -122,6 +122,12 @@ export async function runAssessmentJob(
     context.log(`Executing PowerShell assessment for job ${jobId}`);
     const execution = await execFileAsync("pwsh", argumentsList, {
       cwd: path.dirname(settings.scriptPath),
+      env: {
+        ...process.env,
+        ASSESSMENT_PRICING_LOOKUP_HELPER_PATH: settings.pricingLookupHelperPath,
+        ASSESSMENT_VM_SKU_LOOKUP_HELPER_PATH: settings.vmSkuLookupHelperPath,
+        ASSESSMENT_VM_SKU_TARGET_FAMILIES: settings.vmSkuTargetFamilies.join(","),
+      },
       maxBuffer: 10 * 1024 * 1024,
     });
     const combinedOutput = [execution.stdout, execution.stderr]

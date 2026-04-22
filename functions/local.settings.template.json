@@ -15,8 +15,19 @@
     "ASSESSMENT_CONFIG_CONTAINER": "assessment-config",
     "ASSESSMENT_REFERENCE_CONTAINER": "assessment-reference",
     "ASSESSMENT_TABLE_NAME": "assessmentjobs",
+    "ASSESSMENT_PRICING_TABLE_NAME": "pricingcache",
+    "ASSESSMENT_PRICING_REFRESH_QUEUE_NAME": "pricing-refresh-jobs",
+    "ASSESSMENT_PRICING_CACHE_MAX_AGE_MINUTES": "1440",
+    "ASSESSMENT_VM_SKU_TABLE_NAME": "vmskucatalog",
+    "ASSESSMENT_VM_SKU_REFRESH_QUEUE_NAME": "vm-sku-refresh-jobs",
+    "ASSESSMENT_VM_SKU_CACHE_MAX_AGE_MINUTES": "1440",
+    "ASSESSMENT_VM_SKU_REFRESH_SCHEDULE": "0 0 */12 * * *",
+    "ASSESSMENT_VM_SKU_TARGET_REGIONS": "",
+    "ASSESSMENT_VM_SKU_TARGET_FAMILIES": "B,D,E",
     "ASSESSMENT_SCRIPT_PATH": "assets\\azure-vm-analysis\\azure-vm-assessment.ps1",
     "ASSESSMENT_DEFAULT_CONFIG_PATH": "assets\\azure-vm-analysis\\azure-vm-assessment.config.jsonc",
-    "ASSESSMENT_OUTPUT_PREFIX": "vm-analysis-api"
+    "ASSESSMENT_OUTPUT_PREFIX": "vm-analysis-api",
+    "ASSESSMENT_PRICING_LOOKUP_HELPER_PATH": "dist\\src\\scripts\\pricingLookupCli.js",
+    "ASSESSMENT_VM_SKU_LOOKUP_HELPER_PATH": "dist\\src\\scripts\\vmSkuCatalogLookupCli.js"
   }
 }

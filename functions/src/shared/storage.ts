@@ -5,6 +5,7 @@ import {
   StorageSharedKeyCredential,
   generateBlobSASQueryParameters,
 } from "@azure/storage-blob";
+import { QueueServiceClient } from "@azure/storage-queue";
 
 import { getAppSettings } from "./config";
 import {
@@ -17,6 +18,11 @@ import {
   AssessmentJobStatus,
   AssessmentManifest,
   AssessmentRequest,
+  PricingCacheEntity,
+  PricingRefreshQueueMessage,
+  VmSkuCatalogEntity,
+  VmSkuCatalogMetadataEntity,
+  VmSkuCatalogRefreshQueueMessage,
 } from "./types";
 
 const DEVELOPMENT_STORAGE_CONNECTION_PREFIX = "UseDevelopmentStorage=true";
@@ -56,9 +62,53 @@ function getBlobServiceClient(): BlobServiceClient {
   return BlobServiceClient.fromConnectionString(settings.storageConnectionString);
 }
 
+function getQueueServiceClient(): QueueServiceClient {
+  const settings = getAppSettings();
+  return QueueServiceClient.fromConnectionString(settings.storageConnectionString);
+}
+
 function getResultsContainerClient() {
   const settings = getAppSettings();
   return getBlobServiceClient().getContainerClient(settings.resultsContainer);
+}
+
+function getPricingTableClient(): TableClient {
+  const settings = getAppSettings();
+  return TableClient.fromConnectionString(
+    settings.storageConnectionString,
+    settings.pricingTableName,
+  );
+}
+
+function getVmSkuTableClient(): TableClient {
+  const settings = getAppSettings();
+  return TableClient.fromConnectionString(
+    settings.storageConnectionString,
+    settings.vmSkuTableName,
+  );
+}
+
+function getPricingRefreshQueueClient() {
+  const settings = getAppSettings();
+  return getQueueServiceClient().getQueueClient(settings.pricingRefreshQueueName);
+}
+
+function getVmSkuRefreshQueueClient() {
+  const settings = getAppSettings();
+  return getQueueServiceClient().getQueueClient(settings.vmSkuRefreshQueueName);
+}
+
+function isNotFoundError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  const candidate = error as Error & {
+    statusCode?: number;
+    code?: string;
+  };
+
+  return candidate.statusCode === 404 || candidate.code === "ResourceNotFound";
 }
 
 function parseConnectionString(
@@ -172,6 +222,8 @@ export async function ensureStorageReady(): Promise<void> {
   const settings = getAppSettings();
   const tableClient = getTableClient();
   await tableClient.createTable();
+  await getPricingTableClient().createTable();
+  await getVmSkuTableClient().createTable();
 
   const blobServiceClient = getBlobServiceClient();
   await blobServiceClient
@@ -183,6 +235,11 @@ export async function ensureStorageReady(): Promise<void> {
   await blobServiceClient
     .getContainerClient(settings.referenceContainer)
     .createIfNotExists();
+  await getQueueServiceClient()
+    .getQueueClient(settings.queueName)
+    .createIfNotExists();
+  await getPricingRefreshQueueClient().createIfNotExists();
+  await getVmSkuRefreshQueueClient().createIfNotExists();
 }
 
 export async function createAssessmentJob(
@@ -452,4 +509,100 @@ export async function downloadConfigBlob(
   }
 
   return Buffer.concat(chunks);
+}
+
+export async function getPricingCacheEntity(
+  partitionKey: string,
+  rowKey: string,
+): Promise<PricingCacheEntity | null> {
+  try {
+    return await getPricingTableClient().getEntity<PricingCacheEntity>(
+      partitionKey,
+      rowKey,
+    );
+  } catch (error: unknown) {
+    if (isNotFoundError(error)) {
+      return null;
+    }
+
+    throw error;
+  }
+}
+
+export async function upsertPricingCacheEntity(
+  entity: PricingCacheEntity,
+): Promise<void> {
+  await ensureStorageReady();
+  await getPricingTableClient().upsertEntity(entity, "Replace");
+}
+
+export async function enqueuePricingRefresh(
+  message: PricingRefreshQueueMessage,
+): Promise<void> {
+  await ensureStorageReady();
+  await getPricingRefreshQueueClient().sendMessage(JSON.stringify(message));
+}
+
+export async function getVmSkuCatalogMetadataEntity(
+  partitionKey: string,
+  rowKey: string,
+): Promise<VmSkuCatalogMetadataEntity | null> {
+  try {
+    return await getVmSkuTableClient().getEntity<VmSkuCatalogMetadataEntity>(
+      partitionKey,
+      rowKey,
+    );
+  } catch (error: unknown) {
+    if (isNotFoundError(error)) {
+      return null;
+    }
+
+    throw error;
+  }
+}
+
+export async function listVmSkuCatalogEntities(
+  partitionKey: string,
+): Promise<VmSkuCatalogEntity[]> {
+  const tableClient = getVmSkuTableClient();
+  const entities = tableClient.listEntities<VmSkuCatalogEntity>({
+    queryOptions: {
+      filter: `PartitionKey eq '${escapeODataString(partitionKey)}'`,
+    },
+  });
+
+  const items: VmSkuCatalogEntity[] = [];
+  for await (const entity of entities) {
+    items.push(entity);
+  }
+
+  return items;
+}
+
+export async function upsertVmSkuCatalogMetadataEntity(
+  entity: VmSkuCatalogMetadataEntity,
+): Promise<void> {
+  await ensureStorageReady();
+  await getVmSkuTableClient().upsertEntity(entity, "Replace");
+}
+
+export async function upsertVmSkuCatalogEntities(
+  entities: VmSkuCatalogEntity[],
+): Promise<void> {
+  if (entities.length === 0) {
+    return;
+  }
+
+  await ensureStorageReady();
+  const tableClient = getVmSkuTableClient();
+  for (const entity of entities) {
+    await tableClient.upsertEntity(entity, "Replace");
+  }
+}
+
+export async function enqueueVmSkuCatalogRefresh(
+  message: VmSkuCatalogRefreshQueueMessage,
+): Promise<void> {
+  await ensureStorageReady();
+  await getVmSkuRefreshQueueClient().sendMessage(JSON.stringify(message));
 }

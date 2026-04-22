@@ -8,6 +8,8 @@ This folder contains the backend foundation for the Azure-hosted assessment plat
 - Queue-triggered worker for asynchronous execution
 - Blob-backed artifact upload
 - Table-backed job metadata and status tracking
+- Table-backed VM pricing cache with live lookup fallback
+- Queue-triggered targeted pricing refresh on cache miss
 - PowerShell execution wrapper for the existing VM assessment script
 - Incremental transition from one implicit assessment tenant to a client-aware control-plane model
 
@@ -46,6 +48,10 @@ Relevant runtime app settings:
 - `ASSESSMENT_RESULTS_CONTAINER`
 - `ASSESSMENT_CONFIG_CONTAINER`
 - `ASSESSMENT_REFERENCE_CONTAINER`
+- `ASSESSMENT_PRICING_TABLE_NAME`
+- `ASSESSMENT_PRICING_REFRESH_QUEUE_NAME`
+- `ASSESSMENT_PRICING_CACHE_MAX_AGE_MINUTES`
+- `ASSESSMENT_PRICING_LOOKUP_HELPER_PATH`
 
 ## Local Development
 
@@ -54,6 +60,8 @@ Relevant runtime app settings:
 3. Build with `npm run build`.
 4. Start Azurite with `npm run start:storage`.
 5. Start Functions locally with `npm start`.
+
+The pricing cache uses Azure Table Storage and a queue-backed refresh path, so Azurite needs to be running for local cache hits, write-through caching, and targeted refresh enqueues.
 
 The local launchers resolve the installed Azurite and Azure Functions Core Tools entry points and prepend the active Node.js directory to `PATH`. This avoids the Windows shell-state issue where Core Tools can start but the Node worker fails to spawn because `node` is not visible to the child process.
 
@@ -64,6 +72,8 @@ The build step also syncs the PowerShell analyzer assets into `functions/assets/
 ## Notes
 
 - The queue worker currently targets the VM assessment script in [azure-vm-analysis/azure-vm-assessment.ps1](../azure-vm-analysis/azure-vm-assessment.ps1).
+- Pricing lookups now prefer the Functions pricing cache helper, which reads Azure Table Storage first and falls back to the Azure Retail Prices API on cache miss.
+- Cache misses are written through immediately and also enqueue a targeted background refresh for the same region and SKU key.
 - Blob-backed config support is implemented through `configBlobPath` in the request payload.
 - Result endpoints generate short-lived read links when the storage connection includes a shared key; otherwise they fall back to a direct blob URL shape and blob path metadata.
 - This remains the backend-first phase. The frontend application and full client-registry onboarding workflow will be added on top of this contract.

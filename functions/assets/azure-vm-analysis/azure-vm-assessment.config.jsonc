@@ -14,6 +14,21 @@
   // Leave empty to assess all VMs in the selected subscriptions.
   "VMName": [],
 
+  // Optional VM names to exclude before analysis.
+  // These are matched case-insensitively after any positive VMName filter is applied.
+  "ExcludeVMName": [],
+
+  // Optional YAML file with VM names to exclude.
+  // The file can be either a top-level list:
+  // - vmname001
+  // - vmname002
+  // Or a named list such as:
+  // ExcludeVMName:
+  //   - vmname001
+  //   - vmname002
+  // Relative paths are resolved from this config file's directory.
+  "ExcludeVmListPath": "",
+
   // If true, forces Advisor recommendations to refresh during the run.
   // This can make collection slower but may return newer recommendations.
   "RefreshAdvisor": false,

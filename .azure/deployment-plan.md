@@ -4,12 +4,9 @@ Status: In Progress
 
 ## Scope
 
-Implement the first delivery slice of the multi-tenant Azure assessment platform with two explicit phases:
+Implement the pricing-cache delivery slice for the Azure assessment platform.
 
-- `Bootstrap`: provider-tenant resources, shared identities, Key Vault, storage topology, and client onboarding metadata.
-- `Functions/WebApp`: application deployment and runtime execution that consumes Bootstrap outputs without creating identities or shared resources.
-
-This implementation pass starts with Terraform-based Bootstrap and the minimum backend contract changes needed to stop assuming a single implicit tenant context.
+This implementation pass keeps the existing Azure Functions backend and VM assessment workflow, but replaces live-only VM pricing lookups with a cache-first model backed by Azure Table Storage and targeted queue-driven refresh jobs.
 
 ## Current Workspace Assessment
 
@@ -27,66 +24,68 @@ Existing assets:
 Current state:
 
 - The Functions backend is working locally, but it assumes one deployment tenant and one ambient Azure CLI context.
-- Infrastructure is still Bicep-based even though Terraform is now the target provisioning model.
-- Storage and job metadata are job-centric, not client-centric.
+- VM pricing is still resolved live from the Azure Retail Prices API during each assessment run.
+- Recommendation analysis calls the pricing logic repeatedly for candidate SKUs, which multiplies retail API traffic and latency.
+- Existing storage primitives already include Azure Tables, blobs, and queue-triggered workers that can host a pricing cache without introducing a second runtime.
 
 ## Requirements
 
 Functional requirements:
 
-- Move active provisioning to Terraform.
-- Deploy the application into a provider-controlled tenant and subscription.
-- Allow assessment execution against separate client tenants.
-- Standardize onboarding around per-client app registrations or service principals.
-- Separate Bootstrap from Functions/WebApp so Bootstrap can be run locally first.
+- Add a cache-first pricing lookup path for VM pricing.
+- Use Azure Table Storage as the primary cache for computed pricing models.
+- On cache miss, perform a live Azure Retail Prices API lookup, return that result to the current assessment, and write it into the cache.
+- On cache miss, also enqueue a targeted refresh job for the exact region and SKU shape that was requested.
+- Keep the current assessment flow working locally and in Azure Functions while moving pricing logic toward a service-oriented cache model.
 
 Non-functional requirements:
 
-- Keep the current PowerShell assessment engine in place for early iterations.
-- Keep secrets out of source control and app settings where possible.
-- Partition artifacts and metadata by client from the start.
-- Preserve the working local Functions flow while introducing the new model incrementally.
+- Keep the current Functions runtime and storage account model.
+- Avoid introducing a broad rewrite of the entire assessment engine in one pass.
+- Preserve deterministic pricing behavior by caching the computed pricing model shape that the assessment already consumes.
+- Keep the local Functions build and execution flow intact.
 
 ## Target Architecture
 
-### Bootstrap Phase
+### Functions Runtime
 
-- Terraform provisions the provider resource group, shared storage account, Key Vault, Log Analytics, Application Insights, and user-assigned identities.
-- Shared storage contains job metadata, client registry metadata, queues, config/reference assets, and result artifacts.
-- Key Vault stores references for per-client credentials or certificates.
-- Client onboarding persists normalized records that map `clientId` to tenant, subscriptions, and secret references.
+- Azure Functions continues to host the HTTP API and queue workers.
+- A new pricing cache service is added inside the Functions codebase.
+- A new queue-triggered worker refreshes one pricing cache entry at a time for a specific region, SKU, OS, and license mode.
 
-### Functions/WebApp Phase
+### Pricing Cache Model
 
-- Azure Functions hosts the API and queue worker.
-- The future web app provides operator workflows for client selection, assessment submission, and history.
-- Runtime execution resolves client-specific tenant and subscription scope from stored metadata instead of a single global tenant setting.
+- Azure Table Storage stores computed pricing models keyed by region, SKU, OS profile, and license mode.
+- Queue messages are used to request targeted background refresh for specific pricing keys.
+- Live retail API lookups remain available as a fallback, but no assessment path should rely on them as the primary source when a valid cache entry exists.
 
 ## Current Implementation Slice
 
-1. Switch the active infrastructure path from Bicep to Terraform in repo configuration.
-2. Add the first Terraform Bootstrap foundation for provider-tenant shared resources.
-3. Introduce client-aware request and job metadata in the Functions backend.
-4. Update documentation so local Bootstrap execution and the provider-versus-client model are explicit.
+1. Add pricing cache settings, types, and storage helpers in the Functions backend.
+2. Implement a cache-aware pricing service that reads from Azure Table Storage first and falls back to the Azure Retail Prices API.
+3. Add a queue-triggered pricing refresh function for targeted cache population.
+4. Update the assessment runtime so pricing requests use the cache-aware helper and cache misses enqueue a targeted refresh job.
+5. Update documentation for the new pricing cache behavior and operational settings.
 
 ## Validation Strategy
 
-- Build the Functions project after the contract changes.
-- Run `terraform validate` in `infra/` when Terraform is available locally.
-- Confirm local Functions endpoints still accept and return assessment jobs.
-- Confirm jobs and artifacts now carry a normalized `clientId` even when the caller does not provide one.
+- Build the Functions project after each implementation slice.
+- Run a focused pricing-helper validation for a known region and SKU.
+- Confirm cache hit, miss, write-through, and queue-enqueue behavior for pricing lookups.
+- Confirm the VM assessment workflow still produces pricing-backed outputs after the cache integration.
 
 ## Decisions
 
-- Terraform is the active source of truth for provisioning.
-- `azd` may remain for packaging and app deployment, but not for owning shared infrastructure definitions.
-- The provider tenant is the control plane.
-- Each client tenant will have its own app registration or service principal.
-- Shared provider-owned storage is acceptable initially, provided data is partitioned by client.
+- Azure Table Storage is the first persistence layer for computed pricing cache entries.
+- The cache will store the computed pricing model consumed by the assessment workflow, not the raw retail API payload.
+- Cache misses will still return live pricing when available, then immediately write through to the cache.
+- Cache misses will also enqueue a targeted refresh job for the same pricing key.
+- SKU/spec caching remains a follow-up concern after pricing cache integration is working.
 
 ## Status Tracking
 
 - Plan approved by user: Yes
-- Bootstrap Terraform foundation started: Yes
-- Client-aware backend contract started: Yes
+- Pricing cache implementation started: Yes
+- Cache-aware pricing service started: No
+- Pricing refresh worker started: No
 - Ready for validation: No

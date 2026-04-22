@@ -35,6 +35,12 @@
     Optional path to a JSON or JSONC configuration file. Any setting in the config file is used unless
     the same value is explicitly passed on the command line.
 
+.PARAMETER ExcludeVMName
+    Optional VM names to exclude from the assessment.
+
+.PARAMETER ExcludeVmListPath
+    Optional path to a YAML file containing a list of VM names to exclude.
+
 .EXAMPLE
     .\azure-vm-assessment.ps1 -ConfigPath .\azure-vm-assessment.config.jsonc
 
@@ -49,6 +55,11 @@
     .\azure-vm-assessment.ps1 -SubscriptionId 00000000-0000-0000-0000-000000000000 -OutputPrefix vm-analysis-weekly
 
     Runs without a config file by providing values directly as command-line parameters.
+
+.EXAMPLE
+    .\azure-vm-assessment.ps1 -ConfigPath .\azure-vm-assessment.config.jsonc -ExcludeVmListPath .\excluded-vms.yaml
+
+    Runs with the config file and excludes any VM names listed in the YAML file.
 #>
 
 param(
@@ -57,6 +68,8 @@ param(
     [string[]]$SubscriptionId,
     [string]$OutputPrefix = "vm-analysis",
     [string[]]$VMName,
+    [string[]]$ExcludeVMName,
+    [string]$ExcludeVmListPath,
     [switch]$RefreshAdvisor,
     [double]$UnderutilizedCpuAverageThreshold = 10,
     [double]$UnderutilizedCpuP95Threshold = 25,
@@ -232,6 +245,97 @@ function Import-AssessmentConfig {
     }
 
     return $parsed
+}
+
+function Import-YamlVmNameList {
+    param([string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return @()
+    }
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        throw "YAML exclusion file not found: $Path"
+    }
+
+    $content = Get-Content -LiteralPath $Path -Raw -Encoding UTF8
+    if ([string]::IsNullOrWhiteSpace($content)) {
+        return @()
+    }
+
+    $convertFromYaml = Get-Command ConvertFrom-Yaml -ErrorAction SilentlyContinue
+    if ($convertFromYaml) {
+        $parsed = $content | ConvertFrom-Yaml
+        if ($parsed -is [System.Array]) {
+            return @(Normalize-StringList -Value $parsed)
+        }
+
+        if ($parsed -is [string]) {
+            return @(Normalize-StringList -Value @($parsed))
+        }
+
+        if ($parsed -is [System.Collections.IEnumerable] -and -not ($parsed -is [System.Collections.IDictionary])) {
+            return @(Normalize-StringList -Value @($parsed))
+        }
+
+        $candidateKeys = @('ExcludeVMName', 'ExcludeVmName', 'ExcludedVMName', 'ExcludedVMs', 'VMName', 'VmName')
+        foreach ($key in $candidateKeys) {
+            if ($parsed -is [System.Collections.IDictionary] -and $parsed.Contains($key)) {
+                return @(Normalize-StringList -Value $parsed[$key])
+            }
+
+            if ($parsed.PSObject -and $parsed.PSObject.Properties.Match($key).Count -gt 0) {
+                return @(Normalize-StringList -Value $parsed.$key)
+            }
+        }
+
+        throw "YAML exclusion file must be a top-level list or contain one of these keys: $($candidateKeys -join ', ')."
+    }
+
+    $items = New-Object System.Collections.Generic.List[string]
+    foreach ($line in (Get-Content -LiteralPath $Path -Encoding UTF8)) {
+        $trimmedLine = $line.Trim()
+        if ([string]::IsNullOrWhiteSpace($trimmedLine) -or $trimmedLine.StartsWith('#')) {
+            continue
+        }
+
+        if ($trimmedLine -match '^\-\s*(.+?)\s*$') {
+            $value = $matches[1] -replace '\s+#.*$', ''
+            $value = $value.Trim()
+            $value = $value.Trim("'")
+            $value = $value.Trim('"')
+            if (-not [string]::IsNullOrWhiteSpace($value)) {
+                $items.Add($value)
+            }
+        }
+    }
+
+    if ($items.Count -eq 0) {
+        throw "YAML exclusion file did not contain any list entries. Use either a top-level list or list items under a named key."
+    }
+
+    return @(Normalize-StringList -Value $items)
+}
+
+function New-CaseInsensitiveLookup {
+    param([string[]]$Values)
+
+    $lookup = @{}
+    foreach ($value in (Normalize-StringList -Value $Values)) {
+        $lookup[$value.ToLowerInvariant()] = $true
+    }
+
+    return $lookup
+}
+
+function Test-IsStoppedPowerState {
+    param([string]$PowerState)
+
+    if ([string]::IsNullOrWhiteSpace($PowerState)) {
+        return $false
+    }
+
+    return $PowerState -match 'deallocated|stopped'
 }
 
 function Get-PrimaryZone {
@@ -719,6 +823,95 @@ function Get-SkuCapabilityValue {
     return $null
 }
 
+function Get-ConfiguredVmSkuFamilies {
+    if ([string]::IsNullOrWhiteSpace($env:ASSESSMENT_VM_SKU_TARGET_FAMILIES)) {
+        return @('B', 'D', 'E')
+    }
+
+    $families = @($env:ASSESSMENT_VM_SKU_TARGET_FAMILIES -split '[,;]' | ForEach-Object { $_.Trim().ToUpperInvariant() } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)
+    if ($families.Count -eq 0) {
+        return @('B', 'D', 'E')
+    }
+
+    return $families
+}
+
+function Resolve-VmSkuLookupHelperPath {
+    $candidates = New-Object System.Collections.Generic.List[string]
+
+    if (-not [string]::IsNullOrWhiteSpace($env:ASSESSMENT_VM_SKU_LOOKUP_HELPER_PATH)) {
+        $settingPath = $env:ASSESSMENT_VM_SKU_LOOKUP_HELPER_PATH
+        if ([System.IO.Path]::IsPathRooted($settingPath)) {
+            $candidates.Add($settingPath)
+        }
+        else {
+            $candidates.Add((Join-Path $PSScriptRoot $settingPath))
+            $candidates.Add((Join-Path (Split-Path -Parent $PSScriptRoot) $settingPath))
+            $candidates.Add((Join-Path (Get-Location).Path $settingPath))
+        }
+    }
+
+    $candidates.Add((Join-Path $PSScriptRoot '..\functions\dist\src\scripts\vmSkuCatalogLookupCli.js'))
+    $candidates.Add((Join-Path $PSScriptRoot '..\..\dist\src\scripts\vmSkuCatalogLookupCli.js'))
+
+    foreach ($candidate in $candidates) {
+        $resolved = Resolve-Path -LiteralPath $candidate -ErrorAction SilentlyContinue
+        if ($resolved) {
+            return $resolved.Path
+        }
+    }
+
+    return $null
+}
+
+function Invoke-VmSkuCatalogLookupHelper {
+    param(
+        [string]$Location,
+        [string[]]$Families
+    )
+
+    $helperPath = Resolve-VmSkuLookupHelperPath
+    if ([string]::IsNullOrWhiteSpace($helperPath)) {
+        return $null
+    }
+
+    $nodeCommand = Get-Command node -ErrorAction SilentlyContinue
+    if (-not $nodeCommand) {
+        return $null
+    }
+
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $nodeCommand.Source
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.UseShellExecute = $false
+
+    $arguments = @(
+        $helperPath,
+        '--location', $Location,
+        '--families', ($Families -join ',')
+    )
+
+    foreach ($argument in $arguments) {
+        [void]$psi.ArgumentList.Add($argument)
+    }
+
+    $process = [System.Diagnostics.Process]::Start($psi)
+    $stdout = $process.StandardOutput.ReadToEnd()
+    $stderr = $process.StandardError.ReadToEnd()
+    $process.WaitForExit()
+
+    if ($process.ExitCode -ne 0) {
+        throw "VM SKU lookup helper failed for ${Location}: $stderr"
+    }
+
+    if ([string]::IsNullOrWhiteSpace($stdout)) {
+        throw "VM SKU lookup helper returned no output for ${Location}."
+    }
+
+    return @($stdout | ConvertFrom-Json)
+}
+
 function Get-RegionVmSkuCatalog {
     param(
         [string]$Location,
@@ -730,10 +923,33 @@ function Get-RegionVmSkuCatalog {
         return $Cache[$cacheKey]
     }
 
+    $targetFamilies = @(Get-ConfiguredVmSkuFamilies)
+    $familyLookup = @{}
+    foreach ($family in $targetFamilies) {
+        $familyLookup[$family] = $true
+    }
+
+    try {
+        $cachedCatalog = @(Invoke-VmSkuCatalogLookupHelper -Location $Location -Families $targetFamilies)
+        if ($cachedCatalog.Count -gt 0) {
+            $catalog = @($cachedCatalog | Sort-Object VCpu, MemoryGB, Name)
+            $Cache[$cacheKey] = $catalog
+            return $catalog
+        }
+    }
+    catch {
+        Write-Warning "VM SKU helper unavailable for $Location; falling back to direct az vm list-skus lookup. $($_.Exception.Message)"
+    }
+
     $skuResponse = Invoke-AzCliJson -Arguments @('vm', 'list-skus', '--location', $Location, '--resource-type', 'virtualMachines')
     $catalog = foreach ($sku in (ConvertTo-Array -Value $skuResponse)) {
         $name = [string]$sku.name
-        if ($name -notmatch '^Standard_([BDE])') {
+        if ($name -notmatch '^Standard_([A-Z])') {
+            continue
+        }
+
+        $family = $Matches[1].ToUpperInvariant()
+        if (-not $familyLookup.ContainsKey($family)) {
             continue
         }
 
@@ -746,7 +962,6 @@ function Get-RegionVmSkuCatalog {
             continue
         }
 
-        $family = $Matches[1]
         $vcpuValue = Get-SkuCapabilityValue -Capabilities $sku.capabilities -Name 'vCPUsAvailable'
         if ([string]::IsNullOrWhiteSpace($vcpuValue)) {
             $vcpuValue = Get-SkuCapabilityValue -Capabilities $sku.capabilities -Name 'vCPUs'
@@ -772,6 +987,89 @@ function Get-RegionVmSkuCatalog {
     return $catalog
 }
 
+function Resolve-PricingLookupHelperPath {
+    $candidates = New-Object System.Collections.Generic.List[string]
+
+    if (-not [string]::IsNullOrWhiteSpace($env:ASSESSMENT_PRICING_LOOKUP_HELPER_PATH)) {
+        $settingPath = $env:ASSESSMENT_PRICING_LOOKUP_HELPER_PATH
+        if ([System.IO.Path]::IsPathRooted($settingPath)) {
+            $candidates.Add($settingPath)
+        }
+        else {
+            $candidates.Add((Join-Path $PSScriptRoot $settingPath))
+            $candidates.Add((Join-Path (Split-Path -Parent $PSScriptRoot) $settingPath))
+            $candidates.Add((Join-Path (Get-Location).Path $settingPath))
+        }
+    }
+
+    $candidates.Add((Join-Path $PSScriptRoot '..\functions\dist\src\scripts\pricingLookupCli.js'))
+    $candidates.Add((Join-Path $PSScriptRoot '..\..\dist\src\scripts\pricingLookupCli.js'))
+
+    foreach ($candidate in $candidates) {
+        $resolved = Resolve-Path -LiteralPath $candidate -ErrorAction SilentlyContinue
+        if ($resolved) {
+            return $resolved.Path
+        }
+    }
+
+    return $null
+}
+
+function Invoke-PricingLookupHelper {
+    param(
+        [string]$ArmRegionName,
+        [string]$ArmSkuName,
+        [string]$OsType,
+        [string]$LicenseType
+    )
+
+    $helperPath = Resolve-PricingLookupHelperPath
+    if ([string]::IsNullOrWhiteSpace($helperPath)) {
+        return $null
+    }
+
+    $nodeCommand = Get-Command node -ErrorAction SilentlyContinue
+    if (-not $nodeCommand) {
+        return $null
+    }
+
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $nodeCommand.Source
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.UseShellExecute = $false
+
+    $arguments = @(
+        $helperPath,
+        '--arm-region-name', $ArmRegionName,
+        '--arm-sku-name', $ArmSkuName,
+        '--os-type', $OsType
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($LicenseType)) {
+        $arguments += @('--license-type', $LicenseType)
+    }
+
+    foreach ($argument in $arguments) {
+        [void]$psi.ArgumentList.Add($argument)
+    }
+
+    $process = [System.Diagnostics.Process]::Start($psi)
+    $stdout = $process.StandardOutput.ReadToEnd()
+    $stderr = $process.StandardError.ReadToEnd()
+    $process.WaitForExit()
+
+    if ($process.ExitCode -ne 0) {
+        throw "Pricing lookup helper failed for $ArmSkuName in ${ArmRegionName}: $stderr"
+    }
+
+    if ([string]::IsNullOrWhiteSpace($stdout)) {
+        throw "Pricing lookup helper returned no output for $ArmSkuName in ${ArmRegionName}."
+    }
+
+    return $stdout | ConvertFrom-Json
+}
+
 function Get-PricingModel {
     param(
         [string]$ArmRegionName,
@@ -785,6 +1083,17 @@ function Get-PricingModel {
     $cacheKey = ("{0}|{1}|{2}|{3}" -f $ArmRegionName, $ArmSkuName, $OsType, $licenseMode).ToLowerInvariant()
     if ($Cache.ContainsKey($cacheKey)) {
         return $Cache[$cacheKey]
+    }
+
+    try {
+        $cachedPricing = Invoke-PricingLookupHelper -ArmRegionName $ArmRegionName -ArmSkuName $ArmSkuName -OsType $OsType -LicenseType $LicenseType
+        if ($cachedPricing) {
+            $Cache[$cacheKey] = $cachedPricing
+            return $cachedPricing
+        }
+    }
+    catch {
+        Write-Warning "Pricing helper unavailable for $ArmSkuName in ${ArmRegionName}; falling back to direct retail lookup. $($_.Exception.Message)"
     }
 
     $filter = "serviceName eq 'Virtual Machines' and armRegionName eq '$ArmRegionName' and armSkuName eq '$ArmSkuName'"
@@ -2021,6 +2330,7 @@ function New-HtmlReport {
 
         function buildComparisonCell(row) {
             const hasRecommendation = Boolean(row.RecommendedSku);
+            const targetDiffers = hasRecommendation && String(row.RecommendedSku || '').toLowerCase() !== String(row.VmSize || '').toLowerCase();
             const hasTargetPricing = hasRecommendation && (row.RecommendedPricingAvailable === true || row.RecommendedPricingAvailable === 'True' || Number(row.RecommendedBestMonthlyCost) > 0 || Number(row.RecommendedPaygMonthly) > 0 || Number(row.RecommendedReservation1YearMonthly) > 0 || Number(row.RecommendedReservation3YearMonthly) > 0);
             const payg = hasTargetPricing ? (Number(row.RecommendedPaygMonthly) || 0) : (!hasRecommendation ? (Number(row.PaygMonthly) || 0) : 0);
             const ri1 = hasTargetPricing ? (Number(row.RecommendedReservation1YearMonthly) || 0) : (!hasRecommendation ? (Number(row.Reservation1YearMonthly) || 0) : 0);
@@ -2029,11 +2339,13 @@ function New-HtmlReport {
             const barWidth = (value) => `${Math.max((value / maxValue) * 100, value > 0 ? 6 : 0)}%`;
             if (hasRecommendation && !hasTargetPricing) {
                 const status = row.RecommendedPricingStatus || 'Target pricing unavailable';
-                return `<div class="comparison"><div class="subtle">Target ${escapeHtml(row.RecommendedSku || '')} · ${escapeHtml(status)}</div><div class="price-row"><span>PAYG</span><span class="bar"></span><strong>n/a</strong></div><div class="price-row"><span>1YR</span><span class="bar"></span><strong>n/a</strong></div><div class="price-row"><span>3YR</span><span class="bar"></span><strong>n/a</strong></div></div>`;
+                const currentPaygNote = targetDiffers ? `<div class="subtle">Current ${escapeHtml(row.VmSize || '')} PAYG: ${escapeHtml(formatMoney(row.PaygMonthly, row.CurrencyCode))}</div>` : '';
+                return `<div class="comparison"><div class="subtle">Target ${escapeHtml(row.RecommendedSku || '')} · ${escapeHtml(status)}</div>${currentPaygNote}<div class="price-row"><span>PAYG</span><span class="bar"></span><strong>n/a</strong></div><div class="price-row"><span>1YR</span><span class="bar"></span><strong>n/a</strong></div><div class="price-row"><span>3YR</span><span class="bar"></span><strong>n/a</strong></div></div>`;
             }
 
             const subtitle = hasTargetPricing ? `Target ${escapeHtml(row.RecommendedSku || '')} · Compute with OS license` : 'Current SKU · Compute with OS license';
-            return `<div class="comparison"><div class="subtle">${subtitle}</div><div class="price-row"><span>PAYG</span><span class="bar"><span class="bar-fill fill-payg" style="width:${barWidth(payg)}"></span></span><strong>${escapeHtml(formatMoney(payg, row.CurrencyCode))}</strong></div><div class="price-row"><span>1YR</span><span class="bar"><span class="bar-fill fill-ri1" style="width:${barWidth(ri1)}"></span></span><strong>${escapeHtml(formatMoney(ri1, row.CurrencyCode))}</strong></div><div class="price-row"><span>3YR</span><span class="bar"><span class="bar-fill fill-ri3" style="width:${barWidth(ri3)}"></span></span><strong>${escapeHtml(formatMoney(ri3, row.CurrencyCode))}</strong></div></div>`;
+            const currentPaygNote = hasTargetPricing && targetDiffers ? `<div class="subtle">Current ${escapeHtml(row.VmSize || '')} PAYG: ${escapeHtml(formatMoney(row.PaygMonthly, row.CurrencyCode))}</div>` : '';
+            return `<div class="comparison"><div class="subtle">${subtitle}</div>${currentPaygNote}<div class="price-row"><span>PAYG</span><span class="bar"><span class="bar-fill fill-payg" style="width:${barWidth(payg)}"></span></span><strong>${escapeHtml(formatMoney(payg, row.CurrencyCode))}</strong></div><div class="price-row"><span>1YR</span><span class="bar"><span class="bar-fill fill-ri1" style="width:${barWidth(ri1)}"></span></span><strong>${escapeHtml(formatMoney(ri1, row.CurrencyCode))}</strong></div><div class="price-row"><span>3YR</span><span class="bar"><span class="bar-fill fill-ri3" style="width:${barWidth(ri3)}"></span></span><strong>${escapeHtml(formatMoney(ri3, row.CurrencyCode))}</strong></div></div>`;
         }
 
         function buildRecommendationTable(row) {
@@ -2139,6 +2451,7 @@ if ([string]::IsNullOrWhiteSpace($ConfigPath)) {
 
 $resolvedConfigPath = Resolve-ConfigPath -Path $ConfigPath -BaseDirectory (Get-Location).Path
 $configSettings = Import-AssessmentConfig -Path $resolvedConfigPath
+$configBaseDirectory = if ($resolvedConfigPath) { Split-Path -Parent $resolvedConfigPath } else { $scriptDir }
 
 if (-not $PSBoundParameters.ContainsKey('DaysToInspect') -and $configSettings.ContainsKey('DaysToInspect')) {
     $DaysToInspect = [int]$configSettings['DaysToInspect']
@@ -2161,8 +2474,22 @@ if (-not $PSBoundParameters.ContainsKey('VMName') -and $configSettings.ContainsK
     $VMName = @(ConvertTo-Array -Value $configSettings['VMName'])
 }
 
+if (-not $PSBoundParameters.ContainsKey('ExcludeVMName') -and $configSettings.ContainsKey('ExcludeVMName')) {
+    $ExcludeVMName = @(ConvertTo-Array -Value $configSettings['ExcludeVMName'])
+}
+
+if (-not $PSBoundParameters.ContainsKey('ExcludeVmListPath') -and $configSettings.ContainsKey('ExcludeVmListPath')) {
+    $ExcludeVmListPath = [string]$configSettings['ExcludeVmListPath']
+}
+
 $SubscriptionId = @(Normalize-StringList -Value $SubscriptionId)
 $VMName = @(Normalize-StringList -Value $VMName)
+$ExcludeVMName = @(Normalize-StringList -Value $ExcludeVMName)
+$resolvedExcludeVmListPath = Resolve-ConfigPath -Path $ExcludeVmListPath -BaseDirectory $configBaseDirectory
+$yamlExcludedVmNames = @(Import-YamlVmNameList -Path $resolvedExcludeVmListPath)
+$excludedVmLookup = New-CaseInsensitiveLookup -Values @($ExcludeVMName + $yamlExcludedVmNames)
+$totalExcludedByName = 0
+$totalExcludedStopped = 0
 
 $shouldRefreshAdvisor = if ($PSBoundParameters.ContainsKey('RefreshAdvisor')) {
     $RefreshAdvisor.IsPresent
@@ -2251,6 +2578,12 @@ Write-Host "Subscriptions: $($SubscriptionId -join ', ')" -ForegroundColor Cyan
 if ($resolvedConfigPath) {
     Write-Host "Config file: $resolvedConfigPath" -ForegroundColor Cyan
 }
+if ($resolvedExcludeVmListPath) {
+    Write-Host "Exclude YAML: $resolvedExcludeVmListPath" -ForegroundColor Cyan
+}
+if ($excludedVmLookup.Count -gt 0) {
+    Write-Host "Excluded VM names: $($excludedVmLookup.Count)" -ForegroundColor Cyan
+}
 Write-Host "Output directory: $outputBaseDirectory" -ForegroundColor Cyan
 Write-Host ""
 
@@ -2273,7 +2606,26 @@ foreach ($subscription in $SubscriptionId) {
         $vms = @($vms | Where-Object { $requested -contains ([string]$_.name).ToLowerInvariant() })
     }
 
+    $excludedByNameCount = 0
+    if ($excludedVmLookup.Count -gt 0) {
+        $beforeExcludeByName = $vms.Count
+        $vms = @($vms | Where-Object { -not $excludedVmLookup.ContainsKey(([string]$_.name).ToLowerInvariant()) })
+        $excludedByNameCount = $beforeExcludeByName - $vms.Count
+        $totalExcludedByName += $excludedByNameCount
+    }
+
+    $beforeStoppedFilter = $vms.Count
+    $vms = @($vms | Where-Object {
+            $powerState = if ([string]::IsNullOrWhiteSpace([string]$_.powerState)) { 'Unknown' } else { [string]$_.powerState }
+            -not (Test-IsStoppedPowerState -PowerState $powerState)
+        })
+    $excludedStoppedCount = $beforeStoppedFilter - $vms.Count
+    $totalExcludedStopped += $excludedStoppedCount
+
     Write-Host "  Found $($vms.Count) VM(s) after filtering" -ForegroundColor Green
+    if ($excludedByNameCount -gt 0 -or $excludedStoppedCount -gt 0) {
+        Write-Host "    Excluded by name: $excludedByNameCount | Skipped stopped/deallocated: $excludedStoppedCount" -ForegroundColor DarkGray
+    }
 
     $advisorMap = Get-AdvisorRecommendations -Subscription $subscription -ShouldRefresh:$shouldRefreshAdvisor
     Write-Host "  Advisor VM recommendation targets: $($advisorMap.Keys.Count)" -ForegroundColor Green
@@ -2401,11 +2753,16 @@ foreach ($subscription in $SubscriptionId) {
 
             $record.Recommendation = Get-RecommendationText -Record $record
             if ($bestCandidate.Count -gt 0) {
+                $currentPaygNote = ''
+                if (-not [string]::IsNullOrWhiteSpace([string]$record.RecommendedSku) -and [string]$record.RecommendedSku -ne [string]$record.VmSize -and [double]$record.PaygMonthly -gt 0) {
+                    $currentPaygNote = " Current $($record.VmSize) PAYG is $([math]::Round([double]$record.PaygMonthly, 2)) per month."
+                }
+
                 if ($bestCandidate[0].PricingAvailable) {
-                    $record.Recommendation = ($record.Recommendation + " Recommended target SKU shortlist is led by $($bestCandidate[0].CandidateSku), priced as $($bestCandidate[0].BestMonthlyOption) at $([math]::Round([double]$bestCandidate[0].BestMonthlyCost, 2)) per month.").Trim()
+                    $record.Recommendation = ($record.Recommendation + " Recommended target SKU shortlist is led by $($bestCandidate[0].CandidateSku), priced as $($bestCandidate[0].BestMonthlyOption) at $([math]::Round([double]$bestCandidate[0].BestMonthlyCost, 2)) per month.$currentPaygNote").Trim()
                 }
                 else {
-                    $record.Recommendation = ($record.Recommendation + " Recommended target SKU shortlist is led by $($bestCandidate[0].CandidateSku), but target pricing is currently unavailable ($($bestCandidate[0].PricingStatus)).").Trim()
+                    $record.Recommendation = ($record.Recommendation + " Recommended target SKU shortlist is led by $($bestCandidate[0].CandidateSku), but target pricing is currently unavailable ($($bestCandidate[0].PricingStatus)).$currentPaygNote").Trim()
                 }
             }
             $allResults.Add($record)
@@ -2448,6 +2805,17 @@ elseif ($VMName -and $VMName.Count -gt 0) {
 }
 else {
     "Scope includes $($SubscriptionId.Count) subscription(s) using the current Azure CLI context."
+}
+
+$scopeExclusionParts = @()
+if ($totalExcludedByName -gt 0) {
+    $scopeExclusionParts += "$totalExcludedByName VM name exclusion(s)"
+}
+if ($totalExcludedStopped -gt 0) {
+    $scopeExclusionParts += "$totalExcludedStopped stopped or deallocated VM(s) skipped automatically"
+}
+if ($scopeExclusionParts.Count -gt 0) {
+    $scopeText = ($scopeText.TrimEnd('.') + ". Exclusions applied: " + ($scopeExclusionParts -join '; ') + ".").Trim()
 }
 
 if ($generateHtml) {

@@ -5,3 +5,6 @@ import "./functions/getAssessmentResults";
 import "./functions/getAssessmentArtifact";
 import "./functions/getRuntimeContext";
 import "./functions/runAssessmentJob";
+import "./functions/refreshPricingCache";
+import "./functions/refreshVmSkuCatalog";
+import "./functions/scheduleVmSkuCatalogRefresh";

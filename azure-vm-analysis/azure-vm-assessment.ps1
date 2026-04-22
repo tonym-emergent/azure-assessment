@@ -823,6 +823,95 @@ function Get-SkuCapabilityValue {
     return $null
 }
 
+function Get-ConfiguredVmSkuFamilies {
+    if ([string]::IsNullOrWhiteSpace($env:ASSESSMENT_VM_SKU_TARGET_FAMILIES)) {
+        return @('B', 'D', 'E')
+    }
+
+    $families = @($env:ASSESSMENT_VM_SKU_TARGET_FAMILIES -split '[,;]' | ForEach-Object { $_.Trim().ToUpperInvariant() } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)
+    if ($families.Count -eq 0) {
+        return @('B', 'D', 'E')
+    }
+
+    return $families
+}
+
+function Resolve-VmSkuLookupHelperPath {
+    $candidates = New-Object System.Collections.Generic.List[string]
+
+    if (-not [string]::IsNullOrWhiteSpace($env:ASSESSMENT_VM_SKU_LOOKUP_HELPER_PATH)) {
+        $settingPath = $env:ASSESSMENT_VM_SKU_LOOKUP_HELPER_PATH
+        if ([System.IO.Path]::IsPathRooted($settingPath)) {
+            $candidates.Add($settingPath)
+        }
+        else {
+            $candidates.Add((Join-Path $PSScriptRoot $settingPath))
+            $candidates.Add((Join-Path (Split-Path -Parent $PSScriptRoot) $settingPath))
+            $candidates.Add((Join-Path (Get-Location).Path $settingPath))
+        }
+    }
+
+    $candidates.Add((Join-Path $PSScriptRoot '..\functions\dist\src\scripts\vmSkuCatalogLookupCli.js'))
+    $candidates.Add((Join-Path $PSScriptRoot '..\..\dist\src\scripts\vmSkuCatalogLookupCli.js'))
+
+    foreach ($candidate in $candidates) {
+        $resolved = Resolve-Path -LiteralPath $candidate -ErrorAction SilentlyContinue
+        if ($resolved) {
+            return $resolved.Path
+        }
+    }
+
+    return $null
+}
+
+function Invoke-VmSkuCatalogLookupHelper {
+    param(
+        [string]$Location,
+        [string[]]$Families
+    )
+
+    $helperPath = Resolve-VmSkuLookupHelperPath
+    if ([string]::IsNullOrWhiteSpace($helperPath)) {
+        return $null
+    }
+
+    $nodeCommand = Get-Command node -ErrorAction SilentlyContinue
+    if (-not $nodeCommand) {
+        return $null
+    }
+
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $nodeCommand.Source
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.UseShellExecute = $false
+
+    $arguments = @(
+        $helperPath,
+        '--location', $Location,
+        '--families', ($Families -join ',')
+    )
+
+    foreach ($argument in $arguments) {
+        [void]$psi.ArgumentList.Add($argument)
+    }
+
+    $process = [System.Diagnostics.Process]::Start($psi)
+    $stdout = $process.StandardOutput.ReadToEnd()
+    $stderr = $process.StandardError.ReadToEnd()
+    $process.WaitForExit()
+
+    if ($process.ExitCode -ne 0) {
+        throw "VM SKU lookup helper failed for ${Location}: $stderr"
+    }
+
+    if ([string]::IsNullOrWhiteSpace($stdout)) {
+        throw "VM SKU lookup helper returned no output for ${Location}."
+    }
+
+    return @($stdout | ConvertFrom-Json)
+}
+
 function Get-RegionVmSkuCatalog {
     param(
         [string]$Location,
@@ -834,10 +923,33 @@ function Get-RegionVmSkuCatalog {
         return $Cache[$cacheKey]
     }
 
+    $targetFamilies = @(Get-ConfiguredVmSkuFamilies)
+    $familyLookup = @{}
+    foreach ($family in $targetFamilies) {
+        $familyLookup[$family] = $true
+    }
+
+    try {
+        $cachedCatalog = @(Invoke-VmSkuCatalogLookupHelper -Location $Location -Families $targetFamilies)
+        if ($cachedCatalog.Count -gt 0) {
+            $catalog = @($cachedCatalog | Sort-Object VCpu, MemoryGB, Name)
+            $Cache[$cacheKey] = $catalog
+            return $catalog
+        }
+    }
+    catch {
+        Write-Warning "VM SKU helper unavailable for $Location; falling back to direct az vm list-skus lookup. $($_.Exception.Message)"
+    }
+
     $skuResponse = Invoke-AzCliJson -Arguments @('vm', 'list-skus', '--location', $Location, '--resource-type', 'virtualMachines')
     $catalog = foreach ($sku in (ConvertTo-Array -Value $skuResponse)) {
         $name = [string]$sku.name
-        if ($name -notmatch '^Standard_([BDE])') {
+        if ($name -notmatch '^Standard_([A-Z])') {
+            continue
+        }
+
+        $family = $Matches[1].ToUpperInvariant()
+        if (-not $familyLookup.ContainsKey($family)) {
             continue
         }
 
@@ -850,7 +962,6 @@ function Get-RegionVmSkuCatalog {
             continue
         }
 
-        $family = $Matches[1]
         $vcpuValue = Get-SkuCapabilityValue -Capabilities $sku.capabilities -Name 'vCPUsAvailable'
         if ([string]::IsNullOrWhiteSpace($vcpuValue)) {
             $vcpuValue = Get-SkuCapabilityValue -Capabilities $sku.capabilities -Name 'vCPUs'
@@ -876,6 +987,89 @@ function Get-RegionVmSkuCatalog {
     return $catalog
 }
 
+function Resolve-PricingLookupHelperPath {
+    $candidates = New-Object System.Collections.Generic.List[string]
+
+    if (-not [string]::IsNullOrWhiteSpace($env:ASSESSMENT_PRICING_LOOKUP_HELPER_PATH)) {
+        $settingPath = $env:ASSESSMENT_PRICING_LOOKUP_HELPER_PATH
+        if ([System.IO.Path]::IsPathRooted($settingPath)) {
+            $candidates.Add($settingPath)
+        }
+        else {
+            $candidates.Add((Join-Path $PSScriptRoot $settingPath))
+            $candidates.Add((Join-Path (Split-Path -Parent $PSScriptRoot) $settingPath))
+            $candidates.Add((Join-Path (Get-Location).Path $settingPath))
+        }
+    }
+
+    $candidates.Add((Join-Path $PSScriptRoot '..\functions\dist\src\scripts\pricingLookupCli.js'))
+    $candidates.Add((Join-Path $PSScriptRoot '..\..\dist\src\scripts\pricingLookupCli.js'))
+
+    foreach ($candidate in $candidates) {
+        $resolved = Resolve-Path -LiteralPath $candidate -ErrorAction SilentlyContinue
+        if ($resolved) {
+            return $resolved.Path
+        }
+    }
+
+    return $null
+}
+
+function Invoke-PricingLookupHelper {
+    param(
+        [string]$ArmRegionName,
+        [string]$ArmSkuName,
+        [string]$OsType,
+        [string]$LicenseType
+    )
+
+    $helperPath = Resolve-PricingLookupHelperPath
+    if ([string]::IsNullOrWhiteSpace($helperPath)) {
+        return $null
+    }
+
+    $nodeCommand = Get-Command node -ErrorAction SilentlyContinue
+    if (-not $nodeCommand) {
+        return $null
+    }
+
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $nodeCommand.Source
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.UseShellExecute = $false
+
+    $arguments = @(
+        $helperPath,
+        '--arm-region-name', $ArmRegionName,
+        '--arm-sku-name', $ArmSkuName,
+        '--os-type', $OsType
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($LicenseType)) {
+        $arguments += @('--license-type', $LicenseType)
+    }
+
+    foreach ($argument in $arguments) {
+        [void]$psi.ArgumentList.Add($argument)
+    }
+
+    $process = [System.Diagnostics.Process]::Start($psi)
+    $stdout = $process.StandardOutput.ReadToEnd()
+    $stderr = $process.StandardError.ReadToEnd()
+    $process.WaitForExit()
+
+    if ($process.ExitCode -ne 0) {
+        throw "Pricing lookup helper failed for $ArmSkuName in ${ArmRegionName}: $stderr"
+    }
+
+    if ([string]::IsNullOrWhiteSpace($stdout)) {
+        throw "Pricing lookup helper returned no output for $ArmSkuName in ${ArmRegionName}."
+    }
+
+    return $stdout | ConvertFrom-Json
+}
+
 function Get-PricingModel {
     param(
         [string]$ArmRegionName,
@@ -889,6 +1083,17 @@ function Get-PricingModel {
     $cacheKey = ("{0}|{1}|{2}|{3}" -f $ArmRegionName, $ArmSkuName, $OsType, $licenseMode).ToLowerInvariant()
     if ($Cache.ContainsKey($cacheKey)) {
         return $Cache[$cacheKey]
+    }
+
+    try {
+        $cachedPricing = Invoke-PricingLookupHelper -ArmRegionName $ArmRegionName -ArmSkuName $ArmSkuName -OsType $OsType -LicenseType $LicenseType
+        if ($cachedPricing) {
+            $Cache[$cacheKey] = $cachedPricing
+            return $cachedPricing
+        }
+    }
+    catch {
+        Write-Warning "Pricing helper unavailable for $ArmSkuName in ${ArmRegionName}; falling back to direct retail lookup. $($_.Exception.Message)"
     }
 
     $filter = "serviceName eq 'Virtual Machines' and armRegionName eq '$ArmRegionName' and armSkuName eq '$ArmSkuName'"
