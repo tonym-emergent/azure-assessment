@@ -1,3 +1,26 @@
+# Azure Assessment
+
+This workspace contains assessment tooling and the first backend/infrastructure slices for the Azure-hosted refactor.
+
+## Current Areas
+
+- `azure-vm-analysis/` contains the PowerShell VM analyzer and its reporting outputs.
+- `azure-managed-disk-analysis/` contains managed disk assessment scripts and artifacts.
+- `azure-recovery-services-vault-analysis/` contains recovery services vault assessment scripts and artifacts.
+- `functions/` contains the Azure Functions backend, local runtime scripts, and job/result endpoints.
+- `infra/` contains the Terraform bootstrap foundation and legacy Bicep artifacts retained during the migration.
+
+## Bootstrap And Deployment
+
+- `azure.yaml` still defines the `azd` application, but the active infrastructure provider is now Terraform.
+- `infra/versions.tf`, `infra/main.tf`, `infra/variables.tf`, and `infra/outputs.tf` define the first Bootstrap phase for provider-tenant shared resources.
+- `infra/terraform.tfvars.example` is the local bootstrap input template for provider tenant, provider subscription, and environment naming.
+- `infra/main.bicep` and `infra/main.parameters.json` remain in the repo temporarily as migration references and are no longer the target source of truth.
+
+The Functions build syncs the PowerShell analyzer into `functions/assets/azure-vm-analysis` so the deployed Function App package remains self-contained.
+
+Bootstrap now assumes a single provider-hosted control plane with per-client app registrations or service principals in the client tenants. The first backend contract changes already carry a `clientId` through job creation and artifact storage, which keeps the current worker running while aligning the storage model with the multi-client design.
+
 # Azure Assessment Tools
 
 A comprehensive collection of PowerShell scripts for analyzing and optimizing Azure infrastructure. These tools help identify cost savings opportunities, performance optimization needs, and resource inefficiencies across your Azure subscriptions.
@@ -147,6 +170,14 @@ Run fully from parameters without a config file:
     -OutputPrefix "vm-analysis-weekly"
 ```
 
+Run with explicit exclusions and a YAML exclusion list:
+```powershell
+.\azure-vm-assessment.ps1 `
+    -ConfigPath .\azure-vm-assessment.config.jsonc `
+    -ExcludeVMName vmlegacy001,vmlegacy002 `
+    -ExcludeVmListPath .\excluded-vms.example.yaml
+```
+
 ## 📈 Output Reports
 
 All tools generate three types of reports:
@@ -224,6 +255,8 @@ All tools generate three types of reports:
 | `SubscriptionId` | String[] | Current | Azure subscription ID(s) to analyze |
 | `OutputPrefix` | String | "vm-analysis" | Prefix for generated output file names |
 | `VMName` | String[] | All | Optional VM name filter |
+| `ExcludeVMName` | String[] | None | Optional VM names to exclude before analysis |
+| `ExcludeVmListPath` | String | None | Optional YAML file containing VM names to exclude |
 | `RefreshAdvisor` | Switch | False | Refresh Advisor recommendations during execution |
 | `UnderutilizedCpuAverageThreshold` | Double | 10 | CPU average threshold for underutilization |
 | `UnderutilizedCpuP95Threshold` | Double | 25 | CPU P95 threshold for underutilization |
@@ -237,6 +270,8 @@ All tools generate three types of reports:
 ### VM Analysis Config Notes
 
 - The sample config file is at `azure-vm-analysis/azure-vm-assessment.config.jsonc`.
+- Stopped or deallocated VMs are skipped automatically before telemetry collection and pricing analysis.
+- YAML exclusion files can be either a top-level list or a named list such as `ExcludeVMName:`.
 - Use `.jsonc` when you want inline comments. Use plain `.json` only if you remove comments.
 - Command-line parameters override config values when both are provided.
 - Report behavior is configured under the `Report` object, including output directory, output format toggles, and HTML report text.

@@ -1,0 +1,11 @@
+name: azure-assessment
+metadata:
+  template: azure-assessment-functions@0.1.0
+infra:
+  provider: terraform
+services:
+  api:
+    project: ./functions
+    host: function
+    language: ts
+    dist: dist

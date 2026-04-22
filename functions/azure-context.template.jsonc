@@ -1,0 +1,30 @@
+{
+  // Deployment context: where the app itself lives.
+  "deployment": {
+    "tenantId": "00000000-0000-0000-0000-000000000000",
+    "subscriptionId": "00000000-0000-0000-0000-000000000000",
+    "location": "eastus",
+    "resourceGroupName": "rg-assessment-app-001"
+  },
+
+  // Shared storage context: where job state, configs, and generated artifacts live.
+  "storage": {
+    "subscriptionId": "00000000-0000-0000-0000-000000000000",
+    "resourceGroupName": "rg-assessment-shared",
+    "accountName": "stassessmentshared001",
+    "queueName": "assessment-jobs",
+    "tableName": "assessmentjobs",
+    "resultsContainer": "assessment-results",
+    "configContainer": "assessment-config",
+    "referenceContainer": "assessment-reference"
+  },
+
+  // Assessment scope defaults: what the analyzer should inspect when a caller does not override scope.
+  "assessment": {
+    "defaultSubscriptionIds": [
+      "00000000-0000-0000-0000-000000000000"
+    ],
+    "defaultDaysToInspect": 14,
+    "tool": "vm"
+  }
+}

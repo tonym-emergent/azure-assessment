@@ -1,3 +1,10 @@
 disk-analysis*
 vault-analysis*
 vm-analysis*
+functions/local.settings.json
+functions/dist/
+functions/node_modules/
+infra/.terraform/
+infra/*.tfstate
+infra/*.tfstate.*
+infra/*.tfplan

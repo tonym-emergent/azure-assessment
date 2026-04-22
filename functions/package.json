@@ -1,0 +1,25 @@
+{
+  "name": "azure-assessment-functions",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Azure Functions backend for Azure assessment jobs.",
+  "main": "dist/src/index.js",
+  "scripts": {
+    "build": "tsc -p . && node ./scripts/sync-analyzer-assets.js",
+    "clean": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\"",
+    "watch": "tsc -p . --watch",
+    "start": "npm run build && node ./scripts/start-functions-host.js",
+    "start:host": "node ./scripts/start-functions-host.js",
+    "start:storage": "node ./scripts/start-azurite.js",
+    "sync:assets": "node ./scripts/sync-analyzer-assets.js"
+  },
+  "dependencies": {
+    "@azure/data-tables": "^13.3.1",
+    "@azure/functions": "^4.8.0",
+    "@azure/storage-blob": "^12.28.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.16.11",
+    "typescript": "^5.6.3"
+  }
+}
