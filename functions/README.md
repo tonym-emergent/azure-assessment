@@ -193,6 +193,7 @@ Local notes:
 - Azurite-generated files are intentionally ignored from git.
 - The local launcher scripts resolve installed entry points and prepend the active Node.js path to avoid Windows shell PATH issues.
 - The build step syncs analyzer assets into [functions/assets/azure-vm-analysis/azure-vm-assessment.ps1](assets/azure-vm-analysis/azure-vm-assessment.ps1) so the deployed package remains self-contained.
+- The synced `functions/assets/azure-vm-analysis` directory is generated build output and is intentionally ignored from git. Rebuild or run `npm run sync:assets` after changing the source analyzer under `../azure-vm-analysis`.
 
 ## Internal Scripts
 
