@@ -1,0 +1,14 @@
+environment_name         = "dev"
+location                 = "eastus"
+provider_tenant_id       = "00000000-0000-0000-0000-000000000000"
+provider_subscription_id = "00000000-0000-0000-0000-000000000000"
+
+assessment_default_subscription_ids = [
+  "00000000-0000-0000-0000-000000000000",
+]
+
+tags = {
+  Environment = "dev"
+  Owner       = "platform"
+  Workload    = "azure-assessment"
+}

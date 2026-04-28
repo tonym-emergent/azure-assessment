@@ -1,0 +1,11 @@
+# Example VM exclusion list for azure-vm-assessment.ps1
+# Supported formats:
+# 1) Top-level list
+# 2) Named list under ExcludeVMName or VMName
+
+ExcludeVMName:
+  - vmomsapp001
+  - vmcogsdalegw001
+  - vmcogsdalesh2001
+  - vmdb001
+  

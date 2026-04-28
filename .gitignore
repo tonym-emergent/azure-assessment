@@ -1,1 +1,21 @@
 disk-analysis*
+vault-analysis*
+vm-analysis*
+functions/local.settings.json
+functions/.azurite/
+functions/.azurite/**
+functions/__azurite_db_*.json
+functions/__blobstorage__/
+functions/__queuestorage__/
+functions/__tablestorage__/
+functions/dist/
+functions/node_modules/
+infra/.terraform/
+infra/*.tfstate
+infra/*.tfstate.*
+infra/*.tfplan
+
+# Generated function build output and synced analyzer assets.
+functions/assets/azure-vm-analysis/
+infra/*.tfplan
+.vscode/settings.json
