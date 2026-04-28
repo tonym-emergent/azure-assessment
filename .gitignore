@@ -14,4 +14,8 @@ infra/.terraform/
 infra/*.tfstate
 infra/*.tfstate.*
 infra/*.tfplan
+
+# Generated function build output and synced analyzer assets.
+functions/assets/azure-vm-analysis/
+infra/*.tfplan
 .vscode/settings.json

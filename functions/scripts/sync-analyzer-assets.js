@@ -10,6 +10,7 @@ const filesToCopy = [
   "azure-vm-assessment.config.jsonc",
 ];
 
+fs.rmSync(targetRoot, { recursive: true, force: true });
 fs.mkdirSync(targetRoot, { recursive: true });
 
 for (const fileName of filesToCopy) {
@@ -21,6 +22,7 @@ for (const fileName of filesToCopy) {
   }
 
   fs.copyFileSync(sourcePath, targetPath);
+  - The synced `functions/assets/azure-vm-analysis` directory is generated build output and is intentionally ignored from git. Rebuild or run `npm run sync:assets` after changing the source analyzer under `../azure-vm-analysis`.
 }
 
 process.stdout.write(`Synced analyzer assets to ${targetRoot}\n`);
