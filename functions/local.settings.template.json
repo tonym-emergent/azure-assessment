@@ -22,7 +22,7 @@
     "ASSESSMENT_VM_SKU_REFRESH_QUEUE_NAME": "vm-sku-refresh-jobs",
     "ASSESSMENT_VM_SKU_CACHE_MAX_AGE_MINUTES": "1440",
     "ASSESSMENT_VM_SKU_REFRESH_SCHEDULE": "0 0 */12 * * *",
-    "ASSESSMENT_VM_SKU_TARGET_REGIONS": "",
+    "ASSESSMENT_VM_SKU_TARGET_REGIONS": "northcentralus",
     "ASSESSMENT_VM_SKU_TARGET_FAMILIES": "B,D,E",
     "ASSESSMENT_SCRIPT_PATH": "assets\\azure-vm-analysis\\azure-vm-assessment.ps1",
     "ASSESSMENT_DEFAULT_CONFIG_PATH": "assets\\azure-vm-analysis\\azure-vm-assessment.config.jsonc",

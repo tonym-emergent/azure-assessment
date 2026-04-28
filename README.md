@@ -1,176 +1,93 @@
 # Azure Assessment
 
-This workspace contains assessment tooling and the first backend/infrastructure slices for the Azure-hosted refactor.
+This workspace contains standalone PowerShell assessment scripts and an Azure Functions backend that wraps the VM analyzer as an API-driven job system.
 
-## Current Areas
+## Workspace Map
 
-- `azure-vm-analysis/` contains the PowerShell VM analyzer and its reporting outputs.
-- `azure-managed-disk-analysis/` contains managed disk assessment scripts and artifacts.
-- `azure-recovery-services-vault-analysis/` contains recovery services vault assessment scripts and artifacts.
-- `functions/` contains the Azure Functions backend, local runtime scripts, and job/result endpoints.
-- `infra/` contains the Terraform bootstrap foundation and legacy Bicep artifacts retained during the migration.
+- [azure-vm-analysis](azure-vm-analysis)
+    PowerShell VM assessment engine, config samples, and generated report examples.
+- [azure-managed-disk-analysis](azure-managed-disk-analysis)
+    Managed disk telemetry assessment scripts and report assets.
+- [azure-recovery-services-vault-analysis](azure-recovery-services-vault-analysis)
+    Recovery Services Vault assessment scripts and sample outputs.
+- [functions](functions)
+    Azure Functions app for submitting VM assessments, tracking jobs, and downloading results.
+- [infra](infra)
+    Infrastructure definitions for the Azure-hosted deployment path.
 
-## Bootstrap And Deployment
+## What Each Major Script Or App Does
 
-- `azure.yaml` still defines the `azd` application, but the active infrastructure provider is now Terraform.
-- `infra/versions.tf`, `infra/main.tf`, `infra/variables.tf`, and `infra/outputs.tf` define the first Bootstrap phase for provider-tenant shared resources.
-- `infra/terraform.tfvars.example` is the local bootstrap input template for provider tenant, provider subscription, and environment naming.
-- `infra/main.bicep` and `infra/main.parameters.json` remain in the repo temporarily as migration references and are no longer the target source of truth.
+### VM Assessment
 
-The Functions build syncs the PowerShell analyzer into `functions/assets/azure-vm-analysis` so the deployed Function App package remains self-contained.
+- [azure-vm-analysis/azure-vm-assessment.ps1](azure-vm-analysis/azure-vm-assessment.ps1)
+    Main VM analysis engine. Collects Azure Advisor findings, Azure Monitor utilization, pricing, and candidate SKU recommendations, then writes JSON, CSV, and HTML reports.
+- [azure-vm-analysis/azure-vm-assessment.config.jsonc](azure-vm-analysis/azure-vm-assessment.config.jsonc)
+    Sample config file for the VM analyzer.
+- [azure-vm-analysis/excluded-vms.example.yaml](azure-vm-analysis/excluded-vms.example.yaml)
+    Sample YAML file for excluding VM names from the assessment.
 
-Bootstrap now assumes a single provider-hosted control plane with per-client app registrations or service principals in the client tenants. The first backend contract changes already carry a `clientId` through job creation and artifact storage, which keeps the current worker running while aligning the storage model with the multi-client design.
+### Managed Disk Assessment
 
-# Azure Assessment Tools
+- [azure-managed-disk-analysis/azure-managed-disk-telemetry-analysis.ps1](azure-managed-disk-analysis/azure-managed-disk-telemetry-analysis.ps1)
+    Collects disk telemetry and compares observed behavior to disk SKU limits and costs.
+- [azure-managed-disk-analysis/New-DiskAnalysisHtmlReport.ps1](azure-managed-disk-analysis/New-DiskAnalysisHtmlReport.ps1)
+    Generates the managed disk HTML report from processed data.
 
-A comprehensive collection of PowerShell scripts for analyzing and optimizing Azure infrastructure. These tools help identify cost savings opportunities, performance optimization needs, and resource inefficiencies across your Azure subscriptions.
+### Recovery Services Vault Assessment
 
-## 🛠️ Available Assessment Tools
+- [azure-recovery-services-vault-analysis/recovery-services-vault-analysis.ps1](azure-recovery-services-vault-analysis/recovery-services-vault-analysis.ps1)
+    Reviews vault backup posture, churn, and storage-related risk signals.
 
-### 1. Managed Disk Analysis
-**Location:** `azure-managed-disk-analysis/`
+### Functions Backend
 
-Analyzes Azure managed disk performance telemetry to identify optimization opportunities for disk sizing, SKU selection, and cost reduction.
+- [functions/README.md](functions/README.md)
+    Detailed contract for the Azure Functions backend, including endpoints, app settings, and internal workers.
+- [functions/src/functions/submitAssessment.ts](functions/src/functions/submitAssessment.ts)
+    HTTP entrypoint for creating a VM assessment job.
+- [functions/src/functions/runAssessmentJob.ts](functions/src/functions/runAssessmentJob.ts)
+    Queue-triggered worker that executes the PowerShell analyzer.
+- [functions/src/shared/assessmentRunner.ts](functions/src/shared/assessmentRunner.ts)
+    PowerShell execution wrapper that resolves config, forwards helper paths, parses artifact paths, and uploads outputs.
 
-**Key Features:**
-- Performance metrics analysis (IOPS, throughput, latency)
-- Cost comparison across disk SKUs (Standard HDD, Standard SSD, Premium SSD, Premium SSD v2)
-- Identification of over-provisioned and under-utilized disks
-- Custom disk size detection and optimization recommendations
-- Interactive HTML reports with filtering and sorting
+## Functions API Quick Start
 
-[📖 Full Documentation](azure-managed-disk-analysis/README.md)
+The Functions app is documented in detail in [functions/README.md](functions/README.md). At a high level it exposes:
 
-### 2. Recovery Services Vault Analysis
-**Location:** `azure-recovery-services-vault-analysis/`
+- `POST /api/assessments`
+- `GET /api/assessments`
+- `GET /api/assessments/{jobId}`
+- `GET /api/assessments/{jobId}/results`
+- `GET /api/assessments/{jobId}/artifacts/{artifactName}`
+- `GET /api/context`
 
-Analyzes Azure Recovery Services Vaults backup configurations to identify high-churn VMs and estimate backup storage consumption patterns.
+When deployed to Azure, these HTTP functions require a function key.
 
-**Key Features:**
-- Backup policy and schedule analysis
-- Protected VM backup status monitoring
-- Daily churn rate estimation from backup jobs
-- Cost analysis based on backup storage patterns
-- High-churn VM identification for investigation
-- Interactive HTML reports with risk level highlighting
+## VM Assessment Quick Start
 
-[📖 Full Documentation](azure-recovery-services-vault-analysis/README.md)
+Prerequisites:
 
-### 3. Virtual Machine Analysis
-**Location:** `azure-vm-analysis/`
+- Azure CLI installed and logged in with `az login`
+- PowerShell 7 or later recommended
+- Read access to the target subscriptions and resources
 
-Analyzes Azure Virtual Machines for Advisor recommendations, host utilization, and VM pricing comparisons across pay-as-you-go and reserved instance options.
+Run the standalone VM analyzer with a config file:
 
-**Key Features:**
-- Azure Advisor Cost and Performance recommendation collection per VM
-- Host-metric utilization analysis using Azure Monitor CPU, network, disk, and B-series credit metrics
-- Improved PAYG, 1-year RI, and 3-year RI pricing comparison with Windows OS license modeled when applicable
-- Top-3 B-series, D-series, and E-series target SKU recommendations based on utilization and regional SKU availability
-- Self-contained HTML report with sorting, filtering, visible-row CSV export, and rationale sections below each VM row
-- Config-driven execution with inline-documented settings and report behavior
-
-## 🚀 Quick Start
-
-### Prerequisites
-
-- **Azure CLI** installed and configured (`az` command available)
-- **PowerShell** 5.1 or later (PowerShell Core 7+ recommended)
-- **Azure Authentication**: You must be logged in via Azure CLI (`az login`)
-- **Permissions**: Read access to the Azure resources you want to analyze
-
-### Installation
-
-1. **Clone or download this repository:**
-   ```powershell
-   git clone https://github.com/tonym-emergent/azure-assessment.git
-   cd azure-assessment
-   ```
-
-2. **Ensure Azure CLI is installed:**
-   ```powershell
-   az --version
-   ```
-
-3. **Login to Azure:**
-   ```powershell
-   az login
-   ```
-
-## 📊 Usage Examples
-
-### Managed Disk Analysis
-
-Analyze all disks in your current subscription:
 ```powershell
-cd azure-managed-disk-analysis
-.\azure-managed-disk-telemetry-analysis.ps1
-```
-
-Analyze disks in a specific subscription over the last 7 days:
-```powershell
-.\azure-managed-disk-telemetry-analysis.ps1 `
-    -SubscriptionId "12345678-1234-1234-1234-123456789012" `
-    -DaysToInspect 7
-```
-
-Multi-subscription analysis with custom thresholds:
-```powershell
-.\azure-managed-disk-telemetry-analysis.ps1 `
-    -SubscriptionId @("sub-id-1", "sub-id-2") `
-    -DaysToInspect 30 `
-    -ExceedanceThreshold 0.10 `
-    -OutputPrefix "monthly-disk-report"
-```
-
-### Recovery Services Vault Analysis
-
-Analyze all vaults in your current subscription:
-```powershell
-cd azure-recovery-services-vault-analysis
-.\recovery-services-vault-analysis.ps1
-```
-
-Analyze vaults over the last 14 days with custom churn threshold:
-```powershell
-.\recovery-services-vault-analysis.ps1 `
-    -SubscriptionId "12345678-1234-1234-1234-123456789012" `
-    -DaysToInspect 14 `
-    -HighChurnThresholdGB 100
-```
-
-Multi-subscription backup analysis:
-```powershell
-.\recovery-services-vault-analysis.ps1 `
-    -SubscriptionId @("sub-id-1", "sub-id-2") `
-    -OutputPrefix "monthly-backup-report"
-```
-
-### Virtual Machine Analysis
-
-Run with the sample config file:
-```powershell
-cd azure-vm-analysis
+Set-Location azure-vm-analysis
 .\azure-vm-assessment.ps1 -ConfigPath .\azure-vm-assessment.config.jsonc
 ```
 
-Run with config but override a few values from the command line:
-```powershell
-.\azure-vm-assessment.ps1 `
-    -ConfigPath .\azure-vm-assessment.config.jsonc `
-    -DaysToInspect 1 `
-    -VMName vmadconnect001 `
-    -OutputPrefix vm-analysis-smoke
-```
+Run with explicit parameters:
 
-Run fully from parameters without a config file:
 ```powershell
 .\azure-vm-assessment.ps1 `
-    -SubscriptionId "12345678-1234-1234-1234-123456789012" `
+    -SubscriptionId "11111111-1111-1111-1111-111111111111" `
     -DaysToInspect 14 `
-    -OutputPrefix "vm-analysis-weekly"
+    -OutputPrefix vm-analysis-weekly
 ```
 
-Run with explicit exclusions and a YAML exclusion list:
+Run with exclusions:
+
 ```powershell
 .\azure-vm-assessment.ps1 `
     -ConfigPath .\azure-vm-assessment.config.jsonc `
@@ -178,86 +95,31 @@ Run with explicit exclusions and a YAML exclusion list:
     -ExcludeVmListPath .\excluded-vms.example.yaml
 ```
 
-## 📈 Output Reports
+## Local Functions Quick Start
 
-All tools generate three types of reports:
+```powershell
+Set-Location functions
+Copy-Item local.settings.template.json local.settings.json
+npm install
+npm run build
+npm run start:storage
+npm start
+```
 
-### 1. HTML Report (Interactive)
-- **Beautiful, interactive dashboard** with statistics and visualizations
-- **Sortable and filterable tables** for easy data exploration
-- **Color-coded risk levels** for quick identification of issues
-- **Export functionality** to CSV from filtered results
-- **Responsive design** for viewing on any device
+Important local note:
 
-### 2. CSV Report (Data Analysis)
-- **Comma-separated values** for Excel, Power BI, or custom analysis
-- **Complete dataset** with all metrics and recommendations
-- **Easy import** into existing reporting workflows
+- Azurite-generated files are ignored and should not be committed.
+- The VM pricing cache and VM SKU/spec cache both rely on local table and queue storage when `AzureWebJobsStorage=UseDevelopmentStorage=true`.
 
-### 3. JSON Report (Programmatic Access)
-- **Structured data** for API integration
-- **Machine-readable format** for automation
-- **Complete metadata** for downstream processing
+## Outputs
 
-## 🎯 Common Use Cases
+The standalone scripts and the Functions-backed VM workflow produce:
 
-### Cost Optimization
-- **Identify over-provisioned disks** that can be downsized
-- **Find Standard HDD disks** that should be Standard SSD
-- **Detect inefficient custom sizes** near tier boundaries
-- **Estimate monthly savings** from optimization actions
+- JSON reports for machine-readable downstream processing
+- CSV reports for Excel or Power BI analysis
+- HTML reports for interactive review
 
-### Performance Optimization
-- **Identify disks exceeding IOPS limits** that need upgrading
-- **Find throughput bottlenecks** impacting application performance
-- **Detect latency-sensitive workloads** requiring Premium storage
-- **Optimize burst usage** and potential Performance Plus candidates
-
-### Backup Optimization
-- **Identify high-churn VMs** consuming excessive backup storage
-- **Find VMs with backup health issues** requiring attention
-- **Estimate backup costs** based on storage and retention
-- **Review backup policies** for optimization opportunities
-
-### Compliance & Governance
-- **Track disk usage patterns** across subscriptions
-- **Monitor backup coverage** and protection status
-- **Generate audit reports** for management review
-- **Identify configuration drift** from standards
-
-## 🔧 Configuration
-
-### Disk Analysis Parameters
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `DaysToInspect` | Int | 7 | Days of historical metrics to analyze |
-| `ExceedanceThreshold` | Double | 0.05 | Percentage threshold for limit exceedance (5%) |
-| `SubscriptionId` | String[] | Current | Azure subscription ID(s) to analyze |
-| `SpecFile` | String | "disk-specs.json" | Path to disk SKU specifications file |
-| `OutputPrefix` | String | "disk-analysis" | Prefix for output files |
-
-### Vault Analysis Parameters
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `DaysToInspect` | Int | 30 | Days of historical backup data to analyze |
-| `HighChurnThresholdGB` | Double | 50 | Daily churn threshold (GB) to flag high-churn VMs |
-| `SubscriptionId` | String[] | Current | Azure subscription ID(s) to analyze |
-| `OutputPrefix` | String | "vault-analysis" | Prefix for output files |
-
-### VM Analysis Parameters
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `ConfigPath` | String | None | Path to a JSON or JSONC config file |
-| `DaysToInspect` | Int | 14 | Days of Azure Monitor history to analyze |
-| `SubscriptionId` | String[] | Current | Azure subscription ID(s) to analyze |
-| `OutputPrefix` | String | "vm-analysis" | Prefix for generated output file names |
-| `VMName` | String[] | All | Optional VM name filter |
-| `ExcludeVMName` | String[] | None | Optional VM names to exclude before analysis |
-| `ExcludeVmListPath` | String | None | Optional YAML file containing VM names to exclude |
-| `RefreshAdvisor` | Switch | False | Refresh Advisor recommendations during execution |
+The Functions path also produces an execution log and manifest per job.
 | `UnderutilizedCpuAverageThreshold` | Double | 10 | CPU average threshold for underutilization |
 | `UnderutilizedCpuP95Threshold` | Double | 25 | CPU P95 threshold for underutilization |
 | `OverutilizedCpuAverageThreshold` | Double | 65 | CPU average threshold for overutilization |

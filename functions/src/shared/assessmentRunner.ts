@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { promises as fs } from "node:fs";
+import { existsSync, promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -50,6 +50,51 @@ function parseArtifactPaths(output: string): ParsedArtifacts {
   }
 
   return artifacts;
+}
+
+function resolvePowerShellExecutable(): string {
+  const configuredPath = process.env.ASSESSMENT_PWSH_PATH?.trim();
+  if (configuredPath) {
+    return configuredPath;
+  }
+
+  if (process.platform === "win32") {
+    const candidates = [
+      process.env.ProgramW6432,
+      process.env.ProgramFiles,
+      process.env["ProgramFiles(x86)"],
+    ]
+      .filter((value): value is string => Boolean(value && value.trim()))
+      .map((basePath) => path.join(basePath, "PowerShell", "7", "pwsh.exe"));
+
+    const discoveredPath = candidates.find((candidate) => existsSync(candidate));
+    if (discoveredPath) {
+      return discoveredPath;
+    }
+  }
+
+  return "pwsh";
+}
+
+async function filterExistingArtifacts(
+  artifacts: ParsedArtifacts,
+): Promise<ParsedArtifacts> {
+  const entries = await Promise.all(
+    Object.entries(artifacts).map(async ([key, candidatePath]) => {
+      if (!candidatePath) {
+        return [key, undefined] as const;
+      }
+
+      try {
+        await fs.access(candidatePath);
+        return [key, candidatePath] as const;
+      } catch {
+        return [key, undefined] as const;
+      }
+    }),
+  );
+
+  return Object.fromEntries(entries) as ParsedArtifacts;
 }
 
 async function resolveConfigPath(
@@ -120,7 +165,7 @@ export async function runAssessmentJob(
     }
 
     context.log(`Executing PowerShell assessment for job ${jobId}`);
-    const execution = await execFileAsync("pwsh", argumentsList, {
+    const execution = await execFileAsync(resolvePowerShellExecutable(), argumentsList, {
       cwd: path.dirname(settings.scriptPath),
       env: {
         ...process.env,
@@ -133,7 +178,7 @@ export async function runAssessmentJob(
     const combinedOutput = [execution.stdout, execution.stderr]
       .filter(Boolean)
       .join("\n");
-    const artifacts = parseArtifactPaths(combinedOutput);
+    const artifacts = await filterExistingArtifacts(parseArtifactPaths(combinedOutput));
 
     if (!artifacts.jsonPath && !artifacts.csvPath && !artifacts.htmlPath) {
       throw new Error(

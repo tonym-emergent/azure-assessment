@@ -185,6 +185,7 @@ async function invokeAzureVmSkuQuery(location: string): Promise<AzureVmSkuRecord
         "json",
       ],
       {
+        shell: process.platform === "win32",
         maxBuffer: 20 * 1024 * 1024,
       },
     );
