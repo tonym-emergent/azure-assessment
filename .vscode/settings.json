@@ -28,6 +28,8 @@
         "/^Set-Location functions; \\$env:AzureWebJobsStorage=\"UseDevelopmentStorage=true\"; node dist/src/scripts/pricingLookupCli\\.js --arm-region-name northcentralus --arm-sku-name Standard_B2as_v2 --os-type Windows$/": {
             "approve": true,
             "matchCommandLine": true
-        }
+        },
+        "winget": true,
+        "gh": true
     }
 }

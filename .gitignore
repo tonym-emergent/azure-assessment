@@ -3,7 +3,7 @@ vault-analysis*
 vm-analysis*
 functions/local.settings.json
 functions/.azurite/
-functions/AzuriteConfig
+functions/.azurite/**
 functions/__azurite_db_*.json
 functions/__blobstorage__/
 functions/__queuestorage__/
@@ -14,3 +14,4 @@ infra/.terraform/
 infra/*.tfstate
 infra/*.tfstate.*
 infra/*.tfplan
+.vscode/settings.json
